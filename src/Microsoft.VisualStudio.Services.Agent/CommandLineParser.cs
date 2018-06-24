@@ -1,6 +1,7 @@
 using Microsoft.VisualStudio.Services.Agent.Util;
 using System;
 using System.Collections.Generic;
+using Microsoft.TeamFoundation.DistributedTask.Logging;
 
 //
 // Pattern:
@@ -18,11 +19,11 @@ namespace Microsoft.VisualStudio.Services.Agent
         public HashSet<string> Flags { get; }
         public Dictionary<string, string> Args { get; }
         public HashSet<string> SecretArgNames { get; }
-        public bool HasArgs { get; private set; }
+        private bool HasArgs { get; set; }
 
         public CommandLineParser(IHostContext hostContext, string[] secretArgNames)
         {
-            _secretMasker = hostContext.GetService<ISecretMasker>();
+            _secretMasker = hostContext.SecretMasker;
             _trace = hostContext.GetTrace(nameof(CommandLineParser));
 
             Commands = new List<string>();
@@ -33,16 +34,10 @@ namespace Microsoft.VisualStudio.Services.Agent
 
         public bool IsCommand(string name)
         {
-            return IsCommand(0, name);
-        }
-
-        public bool IsCommand(int index, string name) 
-        {
             bool result = false;
-
-            if (Commands.Count > index)
+            if (Commands.Count > 0)
             {
-                result = String.Equals(name, Commands[index], StringComparison.CurrentCultureIgnoreCase);
+                result = String.Equals(name, Commands[0], StringComparison.CurrentCultureIgnoreCase);
             }
 
             return result;
@@ -62,7 +57,11 @@ namespace Microsoft.VisualStudio.Services.Agent
                 HasArgs = HasArgs || arg.StartsWith("--");
                 _trace.Info("HasArgs: {0}", HasArgs);
 
-                if (!HasArgs)
+                if (string.Equals(arg, "/?", StringComparison.Ordinal))
+                {
+                    Flags.Add("help");
+                }
+                else if (!HasArgs)
                 {
                     _trace.Info("Adding Command: {0}", arg);
                     Commands.Add(arg.Trim());
@@ -76,7 +75,7 @@ namespace Microsoft.VisualStudio.Services.Agent
                         _trace.Info("arg: {0}", argVal);
 
                         // this means two --args in a row which means previous was a flag
-                        if (argScope != null) 
+                        if (argScope != null)
                         {
                             _trace.Info("Adding flag: {0}", argScope);
                             Flags.Add(argScope.Trim());
@@ -98,7 +97,7 @@ namespace Microsoft.VisualStudio.Services.Agent
                             // ignore duplicates - first wins - below will be val1
                             // --arg1 val1 --arg1 val1
                             Args.Add(argScope, arg);
-                            argScope = null; 
+                            argScope = null;
                         }
                     }
                     else
@@ -117,7 +116,7 @@ namespace Microsoft.VisualStudio.Services.Agent
             _trace.Verbose("done parsing arguments");
 
             // handle last arg being a flag
-            if (argScope != null) 
+            if (argScope != null)
             {
                 Flags.Add(argScope);
             }

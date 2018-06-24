@@ -34,6 +34,9 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
                 .Setup(x => x.GitFetch(It.IsAny<IExecutionContext>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<List<string>>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.FromResult<int>(0));
             _gitCommandManager
+                .Setup(x => x.GitLFSFetch(It.IsAny<IExecutionContext>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Returns(Task.FromResult<int>(0));
+            _gitCommandManager
                 .Setup(x => x.GitCheckout(It.IsAny<IExecutionContext>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.FromResult<int>(0));
             _gitCommandManager
@@ -49,10 +52,10 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
                 .Setup(x => x.GitRemoteSetPushUrl(It.IsAny<IExecutionContext>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<string>()))
                 .Returns(Task.FromResult<int>(0));
             _gitCommandManager
-                .Setup(x => x.GitSubmoduleInit(It.IsAny<IExecutionContext>(), It.IsAny<string>()))
+                .Setup(x => x.GitSubmoduleUpdate(It.IsAny<IExecutionContext>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.FromResult<int>(0));
             _gitCommandManager
-                .Setup(x => x.GitSubmoduleUpdate(It.IsAny<IExecutionContext>(), It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()))
+                .Setup(x => x.GitSubmoduleSync(It.IsAny<IExecutionContext>(), It.IsAny<string>(), It.IsAny<bool>(), It.IsAny<CancellationToken>()))
                 .Returns(Task.FromResult<int>(0));
             _gitCommandManager
                 .Setup(x => x.GitGetFetchUrl(It.IsAny<IExecutionContext>(), It.IsAny<string>()))
@@ -74,7 +77,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             List<string> warnings;
             executionContext
                 .Setup(x => x.Variables)
-                .Returns(new Variables(tc, copy: new Dictionary<string, string>(), maskHints: new List<MaskHint>(), warnings: out warnings));
+                .Returns(new Variables(tc, copy: new Dictionary<string, VariableValue>(), warnings: out warnings));
             executionContext
                 .Setup(x => x.Write(It.IsAny<string>(), It.IsAny<string>()))
                 .Callback((string tag, string message) =>
@@ -100,8 +103,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             int fetchDepth = 0)
         {
             var endpoint = new ServiceEndpoint();
-            endpoint.Data[WellKnownEndpointData.Clean] = clean.ToString();
-            endpoint.Data[WellKnownEndpointData.CheckoutSubmodules] = checkoutSubmodules.ToString();
+            endpoint.Data[EndpointData.Clean] = clean.ToString();
+            endpoint.Data[EndpointData.CheckoutSubmodules] = checkoutSubmodules.ToString();
             endpoint.Url = new Uri(url);
             endpoint.Authorization = new EndpointAuthorization()
             {
@@ -124,13 +127,17 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             using (TestHostContext tc = new TestHostContext(this))
             {
                 // Arrange.
-                string dumySourceFolder = Path.Combine(IOUtil.GetBinPath(), "SourceProviderL0");
+                string dumySourceFolder = Path.Combine(tc.GetDirectory(WellKnownDirectory.Bin), "SourceProviderL0");
                 var executionContext = GetTestExecutionContext(tc, dumySourceFolder, "master", "a596e13f5db8869f44574be0392fb8fe1e790ce4", false);
                 var endpoint = GetTestSourceEndpoint("https://github.com/Microsoft/vsts-agent", false, false);
 
                 var _gitCommandManager = GetDefaultGitCommandMock();
                 tc.SetSingleton<IGitCommandManager>(_gitCommandManager.Object);
-                tc.SetSingleton<IWhichUtil>(new WhichUtil());
+                tc.SetSingleton<IVstsAgentWebProxy>(new VstsAgentWebProxy());
+                var _configStore = new Mock<IConfigurationStore>();
+                _configStore.Setup(x => x.GetSettings()).Returns(() => new AgentSettings() { ServerUrl = "http://localhost:8080/tfs" });
+                tc.SetSingleton<IConfigurationStore>(_configStore.Object);
+                tc.SetSingleton<IAgentCertificateManager>(new AgentCertificateManager());
 
                 GitSourceProvider gitSourceProvider = new ExternalGitSourceProvider();
                 gitSourceProvider.Initialize(tc);
@@ -157,7 +164,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             {
                 var trace = tc.GetTrace();
                 // Arrange.
-                string dumySourceFolder = Path.Combine(IOUtil.GetBinPath(), "SourceProviderL0");
+                string dumySourceFolder = Path.Combine(tc.GetDirectory(WellKnownDirectory.Bin), "SourceProviderL0");
                 try
                 {
                     Directory.CreateDirectory(dumySourceFolder);
@@ -171,7 +178,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
 
                     var _gitCommandManager = GetDefaultGitCommandMock();
                     tc.SetSingleton<IGitCommandManager>(_gitCommandManager.Object);
-                    tc.SetSingleton<IWhichUtil>(new WhichUtil());
+                    tc.SetSingleton<IVstsAgentWebProxy>(new VstsAgentWebProxy());
+                    var _configStore = new Mock<IConfigurationStore>();
+                    _configStore.Setup(x => x.GetSettings()).Returns(() => new AgentSettings() { ServerUrl = "http://localhost:8080/tfs" });
+                    tc.SetSingleton<IConfigurationStore>(_configStore.Object);
+                    tc.SetSingleton<IAgentCertificateManager>(new AgentCertificateManager());
 
                     GitSourceProvider gitSourceProvider = new ExternalGitSourceProvider();
                     gitSourceProvider.Initialize(tc);
@@ -205,13 +216,17 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             {
                 var trace = tc.GetTrace();
                 // Arrange.
-                string dumySourceFolder = Path.Combine(IOUtil.GetBinPath(), "SourceProviderL0");
+                string dumySourceFolder = Path.Combine(tc.GetDirectory(WellKnownDirectory.Bin), "SourceProviderL0");
                 var executionContext = GetTestExecutionContext(tc, dumySourceFolder, "refs/pull/12345", "a596e13f5db8869f44574be0392fb8fe1e790ce4", false);
                 var endpoint = GetTestSourceEndpoint("https://github.com/Microsoft/vsts-agent", false, false);
 
                 var _gitCommandManager = GetDefaultGitCommandMock();
                 tc.SetSingleton<IGitCommandManager>(_gitCommandManager.Object);
-                tc.SetSingleton<IWhichUtil>(new WhichUtil());
+                tc.SetSingleton<IVstsAgentWebProxy>(new VstsAgentWebProxy());
+                var _configStore = new Mock<IConfigurationStore>();
+                _configStore.Setup(x => x.GetSettings()).Returns(() => new AgentSettings() { ServerUrl = "http://localhost:8080/tfs" });
+                tc.SetSingleton<IConfigurationStore>(_configStore.Object);
+                tc.SetSingleton<IAgentCertificateManager>(new AgentCertificateManager());
 
                 GitSourceProvider gitSourceProvider = new ExternalGitSourceProvider();
                 gitSourceProvider.Initialize(tc);
@@ -239,7 +254,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             {
                 var trace = tc.GetTrace();
                 // Arrange.
-                string dumySourceFolder = Path.Combine(IOUtil.GetBinPath(), "SourceProviderL0");
+                string dumySourceFolder = Path.Combine(tc.GetDirectory(WellKnownDirectory.Bin), "SourceProviderL0");
                 try
                 {
                     Directory.CreateDirectory(dumySourceFolder);
@@ -253,7 +268,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
 
                     var _gitCommandManager = GetDefaultGitCommandMock();
                     tc.SetSingleton<IGitCommandManager>(_gitCommandManager.Object);
-                    tc.SetSingleton<IWhichUtil>(new WhichUtil());
+                    tc.SetSingleton<IVstsAgentWebProxy>(new VstsAgentWebProxy());
+                    var _configStore = new Mock<IConfigurationStore>();
+                    _configStore.Setup(x => x.GetSettings()).Returns(() => new AgentSettings() { ServerUrl = "http://localhost:8080/tfs" });
+                    tc.SetSingleton<IConfigurationStore>(_configStore.Object);
+                    tc.SetSingleton<IAgentCertificateManager>(new AgentCertificateManager());
 
                     GitSourceProvider gitSourceProvider = new ExternalGitSourceProvider();
                     gitSourceProvider.Initialize(tc);
@@ -287,7 +306,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             {
                 var trace = tc.GetTrace();
                 // Arrange.
-                string dumySourceFolder = Path.Combine(IOUtil.GetBinPath(), "SourceProviderL0");
+                string dumySourceFolder = Path.Combine(tc.GetDirectory(WellKnownDirectory.Bin), "SourceProviderL0");
                 try
                 {
                     Directory.CreateDirectory(dumySourceFolder);
@@ -305,7 +324,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
                         .Returns(Task.FromResult<Uri>(new Uri("https://github.com/Microsoft/vsts-another-agent")));
 
                     tc.SetSingleton<IGitCommandManager>(_gitCommandManager.Object);
-                    tc.SetSingleton<IWhichUtil>(new WhichUtil());
+                    tc.SetSingleton<IVstsAgentWebProxy>(new VstsAgentWebProxy());
+                    var _configStore = new Mock<IConfigurationStore>();
+                    _configStore.Setup(x => x.GetSettings()).Returns(() => new AgentSettings() { ServerUrl = "http://localhost:8080/tfs" });
+                    tc.SetSingleton<IConfigurationStore>(_configStore.Object);
+                    tc.SetSingleton<IAgentCertificateManager>(new AgentCertificateManager());
 
                     GitSourceProvider gitSourceProvider = new ExternalGitSourceProvider();
                     gitSourceProvider.Initialize(tc);
@@ -335,7 +358,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             {
                 var trace = tc.GetTrace();
                 // Arrange.
-                string dumySourceFolder = Path.Combine(IOUtil.GetBinPath(), "SourceProviderL0");
+                string dumySourceFolder = Path.Combine(tc.GetDirectory(WellKnownDirectory.Bin), "SourceProviderL0");
                 try
                 {
                     Directory.CreateDirectory(dumySourceFolder);
@@ -349,7 +372,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
 
                     var _gitCommandManager = GetDefaultGitCommandMock();
                     tc.SetSingleton<IGitCommandManager>(_gitCommandManager.Object);
-                    tc.SetSingleton<IWhichUtil>(new WhichUtil());
+                    tc.SetSingleton<IVstsAgentWebProxy>(new VstsAgentWebProxy());
+                    var _configStore = new Mock<IConfigurationStore>();
+                    _configStore.Setup(x => x.GetSettings()).Returns(() => new AgentSettings() { ServerUrl = "http://localhost:8080/tfs" });
+                    tc.SetSingleton<IConfigurationStore>(_configStore.Object);
+                    tc.SetSingleton<IAgentCertificateManager>(new AgentCertificateManager());
 
                     GitSourceProvider gitSourceProvider = new ExternalGitSourceProvider();
                     gitSourceProvider.Initialize(tc);
@@ -385,7 +412,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             {
                 var trace = tc.GetTrace();
                 // Arrange.
-                string dumySourceFolder = Path.Combine(IOUtil.GetBinPath(), "SourceProviderL0");
+                string dumySourceFolder = Path.Combine(tc.GetDirectory(WellKnownDirectory.Bin), "SourceProviderL0");
                 try
                 {
                     Directory.CreateDirectory(dumySourceFolder);
@@ -394,7 +421,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
 
                     var _gitCommandManager = GetDefaultGitCommandMock();
                     tc.SetSingleton<IGitCommandManager>(_gitCommandManager.Object);
-                    tc.SetSingleton<IWhichUtil>(new WhichUtil());
+                    tc.SetSingleton<IVstsAgentWebProxy>(new VstsAgentWebProxy());
+                    var _configStore = new Mock<IConfigurationStore>();
+                    _configStore.Setup(x => x.GetSettings()).Returns(() => new AgentSettings() { ServerUrl = "http://localhost:8080/tfs" });
+                    tc.SetSingleton<IConfigurationStore>(_configStore.Object);
+                    tc.SetSingleton<IAgentCertificateManager>(new AgentCertificateManager());
 
                     GitSourceProvider gitSourceProvider = new ExternalGitSourceProvider();
                     gitSourceProvider.Initialize(tc);
@@ -425,7 +456,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             {
                 var trace = tc.GetTrace();
                 // Arrange.
-                string dumySourceFolder = Path.Combine(IOUtil.GetBinPath(), "SourceProviderL0");
+                string dumySourceFolder = Path.Combine(tc.GetDirectory(WellKnownDirectory.Bin), "SourceProviderL0");
                 try
                 {
                     Directory.CreateDirectory(dumySourceFolder);
@@ -434,7 +465,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
 
                     var _gitCommandManager = GetDefaultGitCommandMock();
                     tc.SetSingleton<IGitCommandManager>(_gitCommandManager.Object);
-                    tc.SetSingleton<IWhichUtil>(new WhichUtil());
+                    tc.SetSingleton<IVstsAgentWebProxy>(new VstsAgentWebProxy());
+                    var _configStore = new Mock<IConfigurationStore>();
+                    _configStore.Setup(x => x.GetSettings()).Returns(() => new AgentSettings() { ServerUrl = "http://localhost:8080/tfs" });
+                    tc.SetSingleton<IConfigurationStore>(_configStore.Object);
+                    tc.SetSingleton<IAgentCertificateManager>(new AgentCertificateManager());
 
                     GitSourceProvider gitSourceProvider = new ExternalGitSourceProvider();
                     gitSourceProvider.Initialize(tc);
@@ -449,6 +484,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
                     _gitCommandManager.Verify(x => x.GitLFSInstall(executionContext.Object, dumySourceFolder));
                     _gitCommandManager.Verify(x => x.GitConfig(executionContext.Object, dumySourceFolder, "remote.origin.lfsurl", "https://someuser:SomePassword%21@github.com/Microsoft/vsts-agent.git/info/lfs"));
                     _gitCommandManager.Verify(x => x.GitConfig(executionContext.Object, dumySourceFolder, "remote.origin.lfspushurl", "https://someuser:SomePassword%21@github.com/Microsoft/vsts-agent.git/info/lfs"));
+                    _gitCommandManager.Verify(x => x.GitLFSFetch(executionContext.Object, dumySourceFolder, "origin", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()));
                     _gitCommandManager.Verify(x => x.GitFetch(executionContext.Object, dumySourceFolder, "origin", It.IsAny<int>(), It.IsAny<List<string>>(), It.IsAny<string>(), It.IsAny<CancellationToken>()));
                     _gitCommandManager.Verify(x => x.GitCheckout(executionContext.Object, dumySourceFolder, "refs/remotes/origin/master", It.IsAny<CancellationToken>()));
                 }
@@ -468,7 +504,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             {
                 var trace = tc.GetTrace();
                 // Arrange.
-                string dumySourceFolder = Path.Combine(IOUtil.GetBinPath(), "SourceProviderL0");
+                string dumySourceFolder = Path.Combine(tc.GetDirectory(WellKnownDirectory.Bin), "SourceProviderL0");
                 try
                 {
                     Directory.CreateDirectory(dumySourceFolder);
@@ -480,7 +516,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
 
                     var _gitCommandManager = GetDefaultGitCommandMock();
                     tc.SetSingleton<IGitCommandManager>(_gitCommandManager.Object);
-                    tc.SetSingleton<IWhichUtil>(new WhichUtil());
+                    tc.SetSingleton<IVstsAgentWebProxy>(new VstsAgentWebProxy());
+                    var _configStore = new Mock<IConfigurationStore>();
+                    _configStore.Setup(x => x.GetSettings()).Returns(() => new AgentSettings() { ServerUrl = "http://localhost:8080/tfs" });
+                    tc.SetSingleton<IConfigurationStore>(_configStore.Object);
+                    tc.SetSingleton<IAgentCertificateManager>(new AgentCertificateManager());
 
                     GitSourceProvider gitSourceProvider = new ExternalGitSourceProvider();
                     gitSourceProvider.Initialize(tc);
@@ -495,6 +535,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
                     _gitCommandManager.Verify(x => x.GitLFSInstall(executionContext.Object, dumySourceFolder));
                     _gitCommandManager.Verify(x => x.GitConfig(executionContext.Object, dumySourceFolder, "remote.origin.lfsurl", "https://someuser:SomePassword%21@github.com/Microsoft/vsts-agent.git/info/lfs"));
                     _gitCommandManager.Verify(x => x.GitConfig(executionContext.Object, dumySourceFolder, "remote.origin.lfspushurl", "https://someuser:SomePassword%21@github.com/Microsoft/vsts-agent.git/info/lfs"));
+                    _gitCommandManager.Verify(x => x.GitLFSFetch(executionContext.Object, dumySourceFolder, "origin", It.IsAny<string>(), It.IsAny<string>(), It.IsAny<CancellationToken>()));
                     _gitCommandManager.Verify(x => x.GitFetch(executionContext.Object, dumySourceFolder, "origin", 10, It.IsAny<List<string>>(), It.IsAny<string>(), It.IsAny<CancellationToken>()));
                     _gitCommandManager.Verify(x => x.GitCheckout(executionContext.Object, dumySourceFolder, "refs/remotes/origin/master", It.IsAny<CancellationToken>()));
                 }

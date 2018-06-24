@@ -96,8 +96,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             _cancellationToken = cancellationToken;
 
             // Find svn in %Path%
-            IWhichUtil whichTool = HostContext.GetService<IWhichUtil>();
-            string svnPath = whichTool.Which("svn");
+            string svnPath = WhichUtil.Which("svn", trace: Trace);
 
             if (string.IsNullOrEmpty(svnPath))
             {
@@ -113,11 +112,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             endpoint.Authorization.Parameters.TryGetValue(EndpointAuthorizationParameters.Username, out _username);
             endpoint.Authorization.Parameters.TryGetValue(EndpointAuthorizationParameters.Password, out _password);
 
-            // TODO: replace explicit string literals with WellKnownEndpointData constants 
-            // as soon as the latters are available thru the Microsoft.TeamFoundation.Build.WebApi package
-
-            _acceptUntrusted = endpoint.Data.ContainsKey(/* WellKnownEndpointData.SvnAcceptUntrustedCertificates */ "acceptUntrustedCerts") &&
-            StringUtil.ConvertToBoolean(endpoint.Data[/* WellKnownEndpointData.SvnAcceptUntrustedCertificates */ "acceptUntrustedCerts"], defaultValue: false);
+            _acceptUntrusted = endpoint.Data.ContainsKey(EndpointData.SvnAcceptUntrustedCertificates) &&
+            StringUtil.ConvertToBoolean(endpoint.Data[EndpointData.SvnAcceptUntrustedCertificates], defaultValue: false);
         }
 
         public async Task<string> UpdateWorkspace(
@@ -547,10 +543,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
                 formattedArgs.Add(QuotedArgument(_password));
             }
 
+            formattedArgs.Add("--no-auth-cache"); // Do not cache credentials
             formattedArgs.Add("--non-interactive");
 
             // Add proxy setting parameters
-            if (!string.IsNullOrEmpty(_context.Variables.Agent_ProxyUrl))
+            var agentProxy = HostContext.GetService<IVstsAgentWebProxy>();
+            if (!string.IsNullOrEmpty(_context.Variables.Agent_ProxyUrl) && !agentProxy.WebProxy.IsBypassed(_endpoint.Url))
             {
                 _context.Debug($"Add proxy setting parameters to '{_svn}' for proxy server '{_context.Variables.Agent_ProxyUrl}'.");
 
@@ -632,7 +630,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
                 string arguments = FormatArgumentsWithDefaults(args);
                 _context.Command($@"{_svn} {arguments}");
                 await processInvoker.ExecuteAsync(
-                    workingDirectory: IOUtil.GetWorkPath(HostContext),
+                    workingDirectory: HostContext.GetDirectory(WellKnownDirectory.Work),
                     fileName: _svn,
                     arguments: arguments,
                     environment: null,
@@ -674,7 +672,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
                 try
                 {
                     await processInvoker.ExecuteAsync(
-                        workingDirectory: IOUtil.GetWorkPath(HostContext),
+                        workingDirectory: HostContext.GetDirectory(WellKnownDirectory.Work),
                         fileName: _svn,
                         arguments: arguments,
                         environment: null,

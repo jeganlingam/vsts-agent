@@ -4,9 +4,9 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
 {
     public static class ContainerFetchEngineDefaultOptions
     {
-        public static readonly TimeSpan DefaultRetryInterval = TimeSpan.FromSeconds(5);
-        public const int DefaultParallelDownloadLimit = 4;
-        public const int DefaultRetryLimit = 5;
-        public static readonly TimeSpan GetFileAsyncTimeout = TimeSpan.FromMinutes(5);
+        public static readonly TimeSpan RetryInterval = TimeSpan.FromSeconds(5);
+        public const int ParallelDownloadLimit = 4;
+        public const int RetryLimit = 5;
+        public const int DownloadBufferSize = 8192;
     }
 }

@@ -8,6 +8,7 @@ using Microsoft.TeamFoundation.DistributedTask.WebApi;
 using Microsoft.VisualStudio.Services.Agent.Util;
 using Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts.Definition;
 using Microsoft.VisualStudio.Services.ReleaseManagement.WebApi.Contracts;
+using ServiceEndpointContracts = Microsoft.VisualStudio.Services.ServiceEndpoints.WebApi;
 using Newtonsoft.Json;
 using Newtonsoft.Json.Linq;
 
@@ -17,7 +18,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
     {
         public Type ExtensionType => typeof(IArtifactExtension);
         public AgentArtifactType ArtifactType => AgentArtifactType.Custom;
-
+        
         public async Task DownloadAsync(IExecutionContext executionContext, ArtifactDefinition artifactDefinition, string downloadFolderPath)
         {
             EnsureVersionBelongsToLinkedDefinition(artifactDefinition);
@@ -26,22 +27,25 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
             if (customArtifactDetails != null)
             {
                 IEnumerable<string> artifactDetails = new EndpointProxy().QueryEndpoint(
-                    customArtifactDetails.Endpoint,
+                    ToServiceEndpoint(customArtifactDetails.Endpoint),
                     customArtifactDetails.ArtifactsUrl,
+                    null,
                     customArtifactDetails.ResultSelector,
                     customArtifactDetails.ResultTemplate,
-                    customArtifactDetails.AuthorizationHeaders,
+                    customArtifactDetails.AuthorizationHeaders?.Select(header => ToAuthorizationHeader(header)).ToList(),
                     customArtifactDetails.ArtifactVariables);
 
                 var artifactDownloadDetailList = new List<CustomArtifactDownloadDetails>();
                 artifactDetails.ToList().ForEach(x => artifactDownloadDetailList.Add(JToken.Parse(x).ToObject<CustomArtifactDownloadDetails>()));
                 if (artifactDownloadDetailList.Count <= 0)
                 {
-                    throw new ArtifactDownloadException(StringUtil.Loc("NoArtifactsFound", artifactDefinition.Version));
+                    executionContext.Warning(StringUtil.Loc("NoArtifactsFound", artifactDefinition.Version));
+                    return;
                 }
 
                 foreach (CustomArtifactDownloadDetails artifactDownloadDetails in artifactDownloadDetailList)
                 {
+                    executionContext.Output(StringUtil.Loc("StartingArtifactDownload", artifactDownloadDetails.DownloadUrl));
                     await DownloadArtifact(executionContext, HostContext, downloadFolderPath, customArtifactDetails, artifactDownloadDetails);
                 }
             }
@@ -93,18 +97,22 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
 
             if (string.Equals(streamType, WellKnownStreamTypes.FileShare, StringComparison.OrdinalIgnoreCase))
             {
+#if !OS_WINDOWS
+                throw new NotSupportedException(StringUtil.Loc("RMFileShareArtifactErrorOnNonWindowsAgent"));
+#else
                 var fileShareArtifact = new FileShareArtifact();
                 customArtifactDetails.RelativePath = artifact.RelativePath ?? string.Empty;
                 var location = artifact.FileShareLocation ?? artifact.DownloadUrl;
                 await fileShareArtifact.DownloadArtifactAsync(executionContext, hostContext, new ArtifactDefinition { Details = customArtifactDetails }, new Uri(location).LocalPath, localFolderPath);
+#endif
             }
             else if (string.Equals(streamType, WellKnownStreamTypes.Zip, StringComparison.OrdinalIgnoreCase))
             {
                 try
                 {
                     IEndpointAuthorizer authorizer = SchemeBasedAuthorizerFactory.GetEndpointAuthorizer(
-                        customArtifactDetails.Endpoint,
-                        customArtifactDetails.AuthorizationHeaders);
+                        ToServiceEndpoint(customArtifactDetails.Endpoint),
+                        customArtifactDetails.AuthorizationHeaders?.Select(header => ToAuthorizationHeader(header)).ToList());
 
                     using (HttpWebResponse webResponse = GetWebResponse(executionContext, artifact.DownloadUrl, authorizer))
                     {
@@ -126,9 +134,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
             else
             {
                 string resourceType = streamType;
-                var errorMessage = StringUtil.Loc("RMStreamTypeNotSupported", resourceType);
-                executionContext.Output(errorMessage);
-                throw new NotSupportedException(errorMessage);
+                var warningMessage = StringUtil.Loc("RMStreamTypeNotSupported", resourceType);
+                executionContext.Warning(warningMessage);
             }
         }
 
@@ -159,7 +166,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
                 throw new InvalidOperationException(errorMessage);
             }
 
-            authorizer.AuthorizeRequest(request);
+            authorizer.AuthorizeRequest(request, null);
             var webResponse = request.GetResponseAsync().Result as HttpWebResponse;
             return webResponse;
         }
@@ -172,11 +179,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
                 // Query for all artifact versions for given artifact source id, these parameters are contained in customArtifactDetails.ArtifactVariables
                 var versionBelongsToDefinition = false;
                 IEnumerable<string> versions = new EndpointProxy().QueryEndpoint(
-                    customArtifactDetails.Endpoint,
+                    ToServiceEndpoint(customArtifactDetails.Endpoint),
                     customArtifactDetails.VersionsUrl,
+                    null,
                     customArtifactDetails.VersionsResultSelector,
                     customArtifactDetails.VersionsResultTemplate,
-                    customArtifactDetails.AuthorizationHeaders,
+                    customArtifactDetails.AuthorizationHeaders?.Select(header => ToAuthorizationHeader(header)).ToList(),
                     customArtifactDetails.ArtifactVariables);
 
                 foreach (var version in versions)
@@ -195,6 +203,66 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
                         StringUtil.Loc("RMArtifactVersionNotBelongToArtifactSource", artifactDefinition.Version, customArtifactDetails.ArtifactVariables["definition"]));
                 }
             }
+        }
+
+        private ServiceEndpointContracts.ServiceEndpoint ToServiceEndpoint(ServiceEndpoint legacyServiceEndpoint)
+        {
+            if (legacyServiceEndpoint == null)
+            {
+                return null;
+            }
+
+            var serviceEndpoint = new ServiceEndpointContracts.ServiceEndpoint
+            {
+                Authorization = ToEndpointAuthorization(legacyServiceEndpoint.Authorization),
+                CreatedBy = legacyServiceEndpoint.CreatedBy,
+                Data = legacyServiceEndpoint.Data,
+                Description = legacyServiceEndpoint.Description,
+                Id = legacyServiceEndpoint.Id,
+                IsReady = legacyServiceEndpoint.IsReady,
+                Name = legacyServiceEndpoint.Name,
+                OperationStatus = legacyServiceEndpoint.OperationStatus,
+                Type = legacyServiceEndpoint.Type,
+                Url = legacyServiceEndpoint.Url
+            };
+
+            return serviceEndpoint;
+        }
+
+        private static ServiceEndpointContracts.EndpointAuthorization ToEndpointAuthorization(EndpointAuthorization legacyEndpointAuthorization)
+        {
+            if (legacyEndpointAuthorization == null)
+            {
+                return null;
+            }
+
+            var endpointAuthorization = new ServiceEndpointContracts.EndpointAuthorization
+            {
+                Scheme = legacyEndpointAuthorization.Scheme
+            };
+
+            foreach (var param in legacyEndpointAuthorization.Parameters)
+            {
+                endpointAuthorization.Parameters.Add(param.Key, param.Value);
+            }
+
+            return endpointAuthorization;
+        }
+
+        private static ServiceEndpointContracts.AuthorizationHeader ToAuthorizationHeader(AuthorizationHeader legacyAuthorizationHeader)
+        {
+            if (legacyAuthorizationHeader == null)
+            {
+                return null;
+            }
+
+            var authorizationHeader = new ServiceEndpointContracts.AuthorizationHeader
+            {
+                Name = legacyAuthorizationHeader.Name,
+                Value = legacyAuthorizationHeader.Value
+            };
+
+            return authorizationHeader;
         }
     }
 }

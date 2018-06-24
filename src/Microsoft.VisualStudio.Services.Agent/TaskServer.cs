@@ -4,6 +4,7 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.TeamFoundation.DistributedTask.WebApi;
 using Microsoft.VisualStudio.Services.WebApi;
+using Microsoft.VisualStudio.Services.Agent.Util;
 
 namespace Microsoft.VisualStudio.Services.Agent
 {
@@ -15,7 +16,7 @@ namespace Microsoft.VisualStudio.Services.Agent
         // task download
         Task<Stream> GetTaskContentZipAsync(Guid taskId, TaskVersion taskVersion, CancellationToken token);
 
-        Task<bool> TaskDefinitionEndpointExist(CancellationToken token);
+        Task<bool> TaskDefinitionEndpointExist();
     }
 
     public sealed class TaskServer : AgentService, ITaskServer
@@ -28,11 +29,27 @@ namespace Microsoft.VisualStudio.Services.Agent
 
         public async Task ConnectAsync(VssConnection jobConnection)
         {
-            _connection = jobConnection;
-
-            if (!_connection.HasAuthenticated)
+            if (HostContext.RunMode == RunMode.Local)
             {
-                await _connection.ConnectAsync();
+                return;
+            }
+
+            _connection = jobConnection;
+            int attemptCount = 5;
+            while (!_connection.HasAuthenticated && attemptCount-- > 0)
+            {
+                try
+                {
+                    await _connection.ConnectAsync();
+                    break;
+                }
+                catch (Exception ex) when (attemptCount > 0)
+                {
+                    Trace.Info($"Catch exception during connect. {attemptCount} attempt left.");
+                    Trace.Error(ex);
+                }
+
+                await Task.Delay(100);
             }
 
             _taskAgentClient = _connection.GetClient<TaskAgentHttpClient>();
@@ -52,20 +69,32 @@ namespace Microsoft.VisualStudio.Services.Agent
         //-----------------------------------------------------------------
         public Task<Stream> GetTaskContentZipAsync(Guid taskId, TaskVersion taskVersion, CancellationToken token)
         {
+            ArgUtil.Equal(RunMode.Normal, HostContext.RunMode, nameof(HostContext.RunMode));
             CheckConnection();
-            return _taskAgentClient.GetTaskContentZipAsync(taskId, taskVersion, null, token);
+            return _taskAgentClient.GetTaskContentZipAsync(taskId, taskVersion, cancellationToken: token);
         }
 
-        public async Task<bool> TaskDefinitionEndpointExist(CancellationToken token)
+        public async Task<bool> TaskDefinitionEndpointExist()
         {
+            if (HostContext.RunMode == RunMode.Local)
+            {
+                return true;
+            }
+
             CheckConnection();
             try
             {
-                var definitions = await _taskAgentClient.GetTaskDefinitionsAsync(cancellationToken: token);
+                // D9BAFED4-0B18-4F58-968D-86655B4D2CE9 ->  CommandLine task
+                var definitions = await _taskAgentClient.GetTaskDefinitionsAsync(new Guid("D9BAFED4-0B18-4F58-968D-86655B4D2CE9"));
             }
             catch (VssResourceNotFoundException)
             {
                 return false;
+            }
+            catch (TaskDefinitionNotFoundException)
+            {
+                // ignore task not found exception
+                // this exception means the task definition is not in the DB, but the rest endpoint exists.
             }
 
             return true;

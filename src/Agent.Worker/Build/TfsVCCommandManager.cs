@@ -29,6 +29,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
         Task ScorchAsync();
         void SetupProxy(string proxyUrl, string proxyUsername, string proxyPassword);
         void CleanupProxySetting();
+        void SetupClientCertificate(string clientCert, string clientCertKey, string clientCertArchive, string clientCertPassword);
         // TODO: Remove parameter move after last-saved-checkin-metadata problem is fixed properly.
         Task ShelveAsync(string shelveset, string commentFile, bool move);
         Task<ITfsVCShelveset> ShelvesetsAsync(string shelveset);
@@ -139,10 +140,20 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             return RunPorcelainCommandAsync(FormatFlags.None, args);
         }
 
-        protected async Task<string> RunPorcelainCommandAsync(FormatFlags formatFlags, params string[] args)
+        protected Task<string> RunPorcelainCommandAsync(bool ignoreStderr, params string[] args)
+        {
+            return RunPorcelainCommandAsync(FormatFlags.None, ignoreStderr, args);
+        }
+
+        protected Task<string> RunPorcelainCommandAsync(FormatFlags formatFlags, params string[] args)
+        {
+            return RunPorcelainCommandAsync(formatFlags, false, args);
+        }
+
+        protected async Task<string> RunPorcelainCommandAsync(FormatFlags formatFlags, bool ignoreStderr, params string[] args)
         {
             // Run the command.
-            TfsVCPorcelainCommandResult result = await TryRunPorcelainCommandAsync(formatFlags, args);
+            TfsVCPorcelainCommandResult result = await TryRunPorcelainCommandAsync(formatFlags, ignoreStderr, args);
             ArgUtil.NotNull(result, nameof(result));
             if (result.Exception != null)
             {
@@ -156,7 +167,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             return string.Join(Environment.NewLine, result.Output ?? new List<string>());
         }
 
-        protected async Task<TfsVCPorcelainCommandResult> TryRunPorcelainCommandAsync(FormatFlags formatFlags, params string[] args)
+        protected async Task<TfsVCPorcelainCommandResult> TryRunPorcelainCommandAsync(FormatFlags formatFlags, bool ignoreStderr, params string[] args)
         {
             // Validation.
             ArgUtil.NotNull(args, nameof(args));
@@ -179,8 +190,15 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
                 {
                     lock (outputLock)
                     {
-                        ExecutionContext.Debug(e.Data);
-                        result.Output.Add(e.Data);
+                        if (ignoreStderr)
+                        {
+                            ExecutionContext.Output(e.Data);
+                        }
+                        else
+                        {
+                            ExecutionContext.Debug(e.Data);
+                            result.Output.Add(e.Data);
+                        }
                     }
                 };
                 string arguments = FormatArguments(formatFlags, args);

@@ -35,21 +35,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             TestHostContext hc = new TestHostContext(this, name);
 
             // Create a random work path.
-            var configStore = new Mock<IConfigurationStore>();
-            _workFolder = Path.Combine(
-                Path.GetDirectoryName(Assembly.GetEntryAssembly().Location),
-                $"_work_{Path.GetRandomFileName()}");
-            var settings = new AgentSettings()
-            {
-                WorkFolder = _workFolder,
-            };
-            configStore.Setup(x => x.GetSettings()).Returns(settings);
-            hc.SetSingleton<IConfigurationStore>(configStore.Object);
+            _workFolder = hc.GetDirectory(WellKnownDirectory.Work);
 
             // Setup the execution context.
             _ec = new Mock<IExecutionContext>();
             List<string> warnings;
-            _variables = new Variables(hc, new Dictionary<string, string>(), new List<MaskHint>(), out warnings);
+            _variables = new Variables(hc, new Dictionary<string, VariableValue>(), out warnings);
             _variables.Set(Constants.Variables.System.CollectionId, CollectionId);
             _variables.Set(WellKnownDistributedTaskVariables.TFCollectionUrl, CollectionUrl);
             _variables.Set(Constants.Variables.System.DefinitionId, DefinitionId);
@@ -78,7 +69,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
                 DateTimeOffset testStartOn = DateTimeOffset.Now;
 
                 // Act.
-                _trackingManager.Create(_ec.Object, _endpoint, "some hash key", trackingFile);
+                _trackingManager.Create(_ec.Object, _endpoint, "some hash key", trackingFile, false);
 
                 // Assert.
                 string topLevelFile = Path.Combine(
@@ -87,7 +78,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
                     Constants.Build.Path.TopLevelTrackingConfigFile);
                 var config = JsonConvert.DeserializeObject<TopLevelTrackingConfig>(
                     value: File.ReadAllText(topLevelFile));
-                    Assert.Equal(1, config.LastBuildDirectoryNumber);
+                Assert.Equal(1, config.LastBuildDirectoryNumber);
                 // Manipulate the expected seconds due to loss of granularity when the
                 // date-time-offset is serialized in a friendly format.
                 Assert.True(testStartOn.AddSeconds(-1) <= config.LastBuildDirectoryCreatedOn);
@@ -108,7 +99,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
                 DateTimeOffset testStartOn = DateTimeOffset.Now;
 
                 // Act.
-                _trackingManager.Create(_ec.Object, _endpoint, HashKey, trackingFile);
+                _trackingManager.Create(_ec.Object, _endpoint, HashKey, trackingFile, false);
 
                 // Assert.
                 TrackingConfig config = _trackingManager.LoadIfExists(_ec.Object, trackingFile) as TrackingConfig;
@@ -371,6 +362,9 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
   ""definitionName"": ""M87_PrintEnvVars"",
   ""fileFormatVersion"": 3,
   ""lastRunOn"": ""09/16/2015 23:56:46 -04:00"",
+  ""repositoryType"": ""tfsgit"",
+  ""lastMaintenanceAttemptedOn"": ""09/16/2015 23:56:46 -04:00"",
+  ""lastMaintenanceCompletedOn"": ""09/16/2015 23:56:46 -04:00"",
   ""build_sourcesdirectory"": ""b00335b6\\gitTest"",
   ""common_testresultsdirectory"": ""b00335b6\\TestResults"",
   ""collectionId"": ""7aee6dde-6381-4098-93e7-50a8264cf066"",
@@ -452,6 +446,9 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
   ""definitionName"": null,
   ""fileFormatVersion"": 3,
   ""lastRunOn"": """",
+  ""repositoryType"": """",
+  ""lastMaintenanceAttemptedOn"": """",
+  ""lastMaintenanceCompletedOn"": """",
   ""build_sourcesdirectory"": ""b00335b6\\s"",
   ""common_testresultsdirectory"": ""b00335b6\\TestResults"",
   ""collectionId"": ""7aee6dde-6381-4098-93e7-50a8264cf066"",
@@ -473,11 +470,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             {
                 // Arrange.
                 string trackingFile = Path.Combine(_workFolder, "trackingconfig.json");
-                _trackingManager.Create(_ec.Object, _endpoint, "some hash key", trackingFile);
+                _trackingManager.Create(_ec.Object, _endpoint, "some hash key", trackingFile, false);
                 DateTimeOffset testStartOn = DateTimeOffset.Now;
 
                 // Act.
-                _trackingManager.Create(_ec.Object, _endpoint, "some hash key", trackingFile);
+                _trackingManager.Create(_ec.Object, _endpoint, "some hash key", trackingFile, false);
 
                 // Assert.
                 string topLevelFile = Path.Combine(

@@ -49,9 +49,21 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                 return false;
             }
 
-            IWorkerCommandExtension extension;
-            if (_commandExtensions.TryGetValue(command.Area, out extension))
+            var disablePlugin = context.Variables.GetBoolean("VSTS_DISABLEPLUGINCOMMAND") ?? StringUtil.ConvertToBoolean(Environment.GetEnvironmentVariable("VSTS_DISABLEPLUGINCOMMAND"));
+            var agentPlugins = HostContext.GetService<IAgentPluginManager>();
+            if (!disablePlugin && agentPlugins.GetPluginCommad(command.Area, command.Event) != null)
             {
+                agentPlugins.ProcessCommand(context, command);
+            }
+            else if (_commandExtensions.TryGetValue(command.Area, out IWorkerCommandExtension extension))
+            {
+                if (!extension.SupportedHostTypes.HasFlag(context.Variables.System_HostType))
+                {
+                    context.Error(StringUtil.Loc("CommandNotSupported", command.Area, context.Variables.System_HostType));
+                    context.CommandResult = TaskResult.Failed;
+                    return false;
+                }
+
                 // process logging command in serialize oreder.
                 lock (_commandSerializeLock)
                 {
@@ -89,6 +101,19 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
     {
         string CommandArea { get; }
 
+        HostTypes SupportedHostTypes { get; }
+
         void ProcessCommand(IExecutionContext context, Command command);
+    }
+
+    [Flags]
+    public enum HostTypes
+    {
+        None = 0,
+        Build = 1,
+        Deployment = 2,
+        PoolMaintenance = 4,
+        Release = 8,
+        All = Build | Deployment | PoolMaintenance | Release,
     }
 }

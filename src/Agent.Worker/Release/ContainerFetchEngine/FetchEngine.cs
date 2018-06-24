@@ -42,7 +42,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
             LogStatistics();
         }
 
-        protected async Task FetchItemsAsync(IEnumerable<ContainerItem> containerItems)
+        protected async Task FetchItemsAsync(IEnumerable<ContainerItem> containerItems, CancellationToken token)
         {
             var itemsToDownload = new List<ContainerItem>();
 
@@ -57,7 +57,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
                 {
                     string localPath = ConvertToLocalPath(item);
 
-                    ExecutionLogger.Info(StringUtil.Loc("RMCopyingFile", item.Path, localPath));
+                    ExecutionLogger.Debug(StringUtil.Format("[File] {0} => {1}", item.Path, localPath));
 
                     _totalFiles++;
 
@@ -84,6 +84,10 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
 
             if (itemsToDownload.Count > 0)
             {
+                var cancellationTokenSource = new CancellationTokenSource();
+                CancellationToken cancellationToken =
+                    CancellationTokenSource.CreateLinkedTokenSource(token, cancellationTokenSource.Token).Token;
+
                 // Used to limit the number of concurrent downloads.
                 SemaphoreSlim downloadThrottle = new SemaphoreSlim(ContainerFetchEngineOptions.ParallelDownloadLimit);
                 Stopwatch watch = Stopwatch.StartNew();
@@ -92,7 +96,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
                 foreach (ContainerItem ticketedItem in itemsToDownload)
                 {
                     _bytesDownloaded += ticketedItem.FileLength;
-                    Task downloadTask = DownloadItemAsync(downloadThrottle, ticketedItem);
+                    Task downloadTask = DownloadItemAsync(downloadThrottle, ticketedItem, cancellationToken);
 
                     if (downloadTask.IsCompleted)
                     {
@@ -105,8 +109,19 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
                     }
                 }
 
-                // Monitor and log the progress of the download tasks if they take over a few seconds.
-                await LogProgressAsync(remainingDownloads).ConfigureAwait(false);
+                try
+                {
+                    // Monitor and log the progress of the download tasks if they take over a few seconds.
+                    await LogProgressAsync(remainingDownloads).ConfigureAwait(false);
+                    cancellationTokenSource.Dispose();
+                }
+                catch (Exception)
+                {
+                    cancellationTokenSource.Cancel();
+                    await Task.WhenAll(remainingDownloads);
+                    cancellationTokenSource.Dispose();
+                    throw;
+                }
 
                 _elapsedDownloadTime += watch.Elapsed;
             }
@@ -120,7 +135,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
 
             if (_downloadedFiles > 0)
             {
-                string message = StringUtil.Loc("RMDownloadProgressDetails", Math.Ceiling(_bytesDownloaded/(1024.0*1024.0)), Math.Floor(_bytesDownloaded/(1024.0*_elapsedDownloadTime.TotalSeconds)), _elapsedDownloadTime, ContainerFetchEngineOptions.ParallelDownloadLimit);
+                string message = StringUtil.Loc("RMDownloadProgressDetails", Math.Ceiling(_bytesDownloaded/(1024.0*1024.0)), Math.Floor(_bytesDownloaded/(1024.0*_elapsedDownloadTime.TotalSeconds)), _elapsedDownloadTime);
                 ExecutionLogger.Output(message);
             }
         }
@@ -172,11 +187,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
                 // check how many downloads remain.
                 if (remainingTasks.Count > 0)
                 {
-                    //Logger.WriteLine("[{0}, {1}] {2} downloads remaining.", 
-                    //    Thread.CurrentThread.ManagedThreadId, 
-                    //    Thread.CurrentThread.IsThreadPoolThread,
-                    //    remainingDownloadTasks.Count);
-
                     if (watch.Elapsed > ProgressInterval)
                     {
                         ExecutionLogger.Output(StringUtil.Loc("RMRemainingDownloads", remainingTasks.Count));
@@ -197,11 +207,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
                     {
                         var taskStates = remainingTasks.GroupBy(dt => dt.Status);
 
-                        ExecutionLogger.Warning(StringUtil.Loc("RMDownloadTaskCompletedStatus", (int)timeSinceLastTaskCompletion.TotalMinutes));
-
-                        foreach (IGrouping<TaskStatus, Task> group in taskStates)
+                        lock (_lock)
                         {
-                            ExecutionLogger.Warning(StringUtil.Loc("RMDownloadTaskStates", group.Key, group.Count()));
+                            ExecutionLogger.Warning(StringUtil.Loc("RMDownloadTaskCompletedStatus", (int) timeSinceLastTaskCompletion.TotalMinutes));
+                            foreach (IGrouping<TaskStatus, Task> group in taskStates)
+                            {
+                                ExecutionLogger.Warning(StringUtil.Loc("RMDownloadTaskStates", group.Key, group.Count()));
+                            }
                         }
 
                         _lastTaskDiagTime = DateTime.UtcNow;
@@ -210,20 +222,29 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
             }
         }
 
-        private Task DownloadItemAsync(SemaphoreSlim downloadThrottle, ContainerItem ticketedItem)
+        private Task DownloadItemAsync(
+            SemaphoreSlim downloadThrottle,
+            ContainerItem ticketedItem,
+            CancellationToken cancellationToken)
         {
             string downloadPath = ConvertToLocalPath(ticketedItem);
 
-            return DownloadItemImplAsync(downloadThrottle, ticketedItem, downloadPath);
+            return DownloadItemImplAsync(downloadThrottle, ticketedItem, downloadPath, cancellationToken);
         }
 
-        private async Task DownloadItemImplAsync(SemaphoreSlim downloadThrottle, ContainerItem ticketedItem, string downloadPath)
+        private async Task DownloadItemImplAsync(
+            SemaphoreSlim downloadThrottle,
+            ContainerItem ticketedItem,
+            string downloadPath,
+            CancellationToken cancellationToken)
         {
             try
             {
+                ExecutionLogger.Debug(StringUtil.Format("Acquiring semaphore to download file {0}", downloadPath));
+
                 await downloadThrottle.WaitAsync().ConfigureAwait(false);
 
-                if (ContainerFetchEngineOptions.CancellationToken.IsCancellationRequested)
+                if (cancellationToken.IsCancellationRequested)
                 {
                     return;
                 }
@@ -235,9 +256,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
                 FileSystemManager.EnsureParentDirectory(tmpDownloadPath);
                 FileSystemManager.DeleteFile(downloadPath);
 
-                await GetFileAsync(ticketedItem, tmpDownloadPath).ConfigureAwait(false);
+                ExecutionLogger.Output(StringUtil.Loc("RMDownloadStartDownloadOfFile", downloadPath));
 
-                if (ContainerFetchEngineOptions.CancellationToken.IsCancellationRequested)
+                await GetFileAsync(ticketedItem, tmpDownloadPath, cancellationToken).ConfigureAwait(false);
+
+                if (cancellationToken.IsCancellationRequested)
                 {
                     return;
                 }
@@ -252,7 +275,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
         }
 
         // Wraps our use of the proxy client library
-        private async Task GetFileAsync(ContainerItem ticketedItem, string tmpDownloadPath)
+        private async Task GetFileAsync(ContainerItem ticketedItem, string tmpDownloadPath, CancellationToken cancellationToken)
         {
             // Will get doubled on each attempt.
             TimeSpan timeBetweenRetries = ContainerFetchEngineOptions.RetryInterval;
@@ -267,41 +290,47 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
 
                 try
                 {
-                    Task<Stream> getFileTask = Provider.GetFileTask(ticketedItem);
-                    Task timeoutTask = Task.Delay(ContainerFetchEngineOptions.GetFileAsyncTimeout, ContainerFetchEngineOptions.CancellationToken);
+                    Task<Stream> getFileTask = Provider.GetFileTask(ticketedItem, cancellationToken);
 
-                    // Wait for GetFileAsync or the timeout to elapse.
-                    await Task.WhenAny(getFileTask, timeoutTask).ConfigureAwait(false);
+                    ExecutionLogger.Debug(StringUtil.Format("Fetching contents of file {0}", tmpDownloadPath));
 
-                    if (ContainerFetchEngineOptions.CancellationToken.IsCancellationRequested)
+                    await getFileTask.ConfigureAwait(false);
+
+                    if (cancellationToken.IsCancellationRequested)
                     {
                         return;
                     }
 
-                    if (!getFileTask.IsCompleted)
-                    {
-                        throw new TimeoutException(
-                            StringUtil.Loc("RMGetFileAsyncTimedOut", GetFileAsyncTimeoutMinutes));
-                    }
+                    ExecutionLogger.Debug(StringUtil.Format("Writing contents of file {0} to disk", tmpDownloadPath));
 
                     using (Stream stream = await getFileTask.ConfigureAwait(false))
                     {
-                        await FileSystemManager.WriteStreamToFile(stream, tmpDownloadPath);
+                        await FileSystemManager.WriteStreamToFile(stream, tmpDownloadPath, ContainerFetchEngineOptions.DownloadBufferSize, cancellationToken);
                     }
+
+                    ExecutionLogger.Debug(StringUtil.Format("Finished writing contents of file {0} to disk", tmpDownloadPath));
 
                     break;
                 }
                 catch (Exception exception)
                 {
+                    if (exception is AggregateException)
+                    {
+                        exception = ((AggregateException)exception).Flatten().InnerException;
+                    }
+
                     if (lastAttempt)
                     {
                         throw new Exception(StringUtil.Loc("RMErrorDownloadingContainerItem", tmpDownloadPath, exception));
                     }
 
-                    ExecutionLogger.Warning(StringUtil.Loc("RMReAttemptingDownloadOfContainerItem", tmpDownloadPath, exception.Message));
+                    lock (_lock)
+                    {
+                        ExecutionLogger.Warning(StringUtil.Loc("RMReAttemptingDownloadOfContainerItem", tmpDownloadPath, exception));
+                    }
                 }
 
-                // "Sleep" inbetween attempts. (Can't await inside a catch clause.)
+                // "Sleep" in between attempts. (Can't await inside a catch clause.)
                 await Task.Delay(timeBetweenRetries);
             }
         }
@@ -352,11 +381,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEng
         private int _downloadedFiles;
         private TimeSpan _elapsedDownloadTime;
         private long _bytesDownloaded;
+        private readonly object _lock = new object();
 
         private static readonly TimeSpan ProgressInterval = TimeSpan.FromSeconds(5);
         private static readonly TimeSpan TaskDiagThreshold = TimeSpan.FromMinutes(1);
 
-        private const int GetFileAsyncTimeoutMinutes = 5;
         public ContainerFetchEngineOptions ContainerFetchEngineOptions { get; set; }
     }
 }

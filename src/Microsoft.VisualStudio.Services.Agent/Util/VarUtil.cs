@@ -6,41 +6,41 @@ using System.Linq;
 
 namespace Microsoft.VisualStudio.Services.Agent.Util
 {
-    [ServiceLocator(Default = typeof(VarUtil))]
-    public interface IVarUtil : IAgentService
+    public static class VarUtil
     {
-        void PrependPath(string directory);
-        void SetEnvironmentVariable(string name, string value);
-    }
-
-    public sealed class VarUtil : AgentService, IVarUtil
-    {
-        public void PrependPath(string directory)
+        public static StringComparer EnvironmentVariableKeyComparer
         {
-            ArgUtil.Directory(directory, nameof(directory));
-
-            // Build the new value.
-            string path = Environment.GetEnvironmentVariable(Constants.PathVariable);
-            if (string.IsNullOrEmpty(path))
+            get
             {
-                // Careful not to add a trailing separator if the PATH is empty.
-                // On OSX/Linux, a trailing separator indicates that "current directory"
-                // is added to the PATH, which is considered a security risk.
-                path = directory;
+                switch (Constants.Agent.Platform)
+                {
+                    case Constants.OSPlatform.Linux:
+                    case Constants.OSPlatform.OSX:
+                        return StringComparer.Ordinal;
+                    case Constants.OSPlatform.Windows:
+                        return StringComparer.OrdinalIgnoreCase;
+                    default:
+                        throw new NotSupportedException(); // Should never reach here.
+                }
             }
-            else
-            {
-                path = directory + Path.PathSeparator + path;
-            }
-
-            // Update the PATH environment variable.
-            Environment.SetEnvironmentVariable(Constants.PathVariable, path);
         }
 
-        public void SetEnvironmentVariable(string name, string value)
+        public static string OS
         {
-            ArgUtil.NotNullOrEmpty(name, nameof(name));
-            Environment.SetEnvironmentVariable(name, value);
+            get
+            {
+                switch (Constants.Agent.Platform)
+                {
+                    case Constants.OSPlatform.Linux:
+                        return "Linux";
+                    case Constants.OSPlatform.OSX:
+                        return "Darwin";
+                    case Constants.OSPlatform.Windows:
+                        return Environment.GetEnvironmentVariable("OS");
+                    default:
+                        throw new NotSupportedException(); // Should never reach here.
+                }
+            }
         }
 
         public static void ExpandEnvironmentVariables(IHostContext context, IDictionary<string, string> target)
@@ -49,23 +49,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Util
             Tracing trace = context.GetTrace(nameof(VarUtil));
             trace.Entering();
 
-            // Determine which string comparer to use for the environment variable dictionary.
-            StringComparer comparer;
-            switch (Constants.Agent.Platform)
-            {
-                case Constants.OSPlatform.Linux:
-                case Constants.OSPlatform.OSX:
-                    comparer = StringComparer.CurrentCulture;
-                    break;
-                case Constants.OSPlatform.Windows:
-                    comparer = StringComparer.CurrentCultureIgnoreCase;
-                    break;
-                default:
-                    throw new NotSupportedException();
-            }
-
             // Copy the environment variables into a dictionary that uses the correct comparer.
-            var source = new Dictionary<string, string>(comparer);
+            var source = new Dictionary<string, string>(EnvironmentVariableKeyComparer);
             IDictionary environment = Environment.GetEnvironmentVariables();
             foreach (DictionaryEntry entry in environment)
             {
@@ -134,7 +119,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Util
             }
         }
 
-        public static bool TryGetValue(Tracing trace, IDictionary<string, string> source, string name, out string val)
+        private static bool TryGetValue(Tracing trace, IDictionary<string, string> source, string name, out string val)
         {
             if (source.TryGetValue(name, out val))
             {

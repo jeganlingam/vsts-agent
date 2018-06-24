@@ -11,7 +11,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
     public sealed class CommandSettingsL0
     {
         private readonly Mock<IPromptManager> _promptManager = new Mock<IPromptManager>();
-        private readonly Mock<ISecretMasker> _secretMasker = new Mock<ISecretMasker>();
 
         // It is sufficient to test one arg only. All individual args are tested by the PromptsFor___ methods.
         // The PromptsFor___ methods suffice to cover the interesting differences between each of the args.
@@ -30,6 +29,62 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
 
                 // Assert.
                 Assert.Equal("some agent", actual);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void GetsArgFromEnvVar()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                try
+                {
+                    // Arrange.
+                    Environment.SetEnvironmentVariable("VSTS_AGENT_INPUT_AGENT", "some agent");
+                    var command = new CommandSettings(hc, args: new string[0]);
+
+                    // Act.
+                    string actual = command.GetAgentName();
+
+                    // Assert.
+                    Assert.Equal("some agent", actual);
+                    Assert.Equal(string.Empty, Environment.GetEnvironmentVariable("VSTS_AGENT_INPUT_AGENT") ?? string.Empty); // Should remove.
+                    Assert.Equal(hc.SecretMasker.MaskSecrets("some agent"), "some agent");
+                }
+                finally
+                {
+                    Environment.SetEnvironmentVariable("VSTS_AGENT_INPUT_AGENT", null);
+                }
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void GetsArgSecretFromEnvVar()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                try
+                {
+                    // Arrange.
+                    Environment.SetEnvironmentVariable("VSTS_AGENT_INPUT_TOKEN", "some secret token value");
+                    var command = new CommandSettings(hc, args: new string[0]);
+
+                    // Act.
+                    string actual = command.GetToken();
+
+                    // Assert.
+                    Assert.Equal("some secret token value", actual);
+                    Assert.Equal(string.Empty, Environment.GetEnvironmentVariable("VSTS_AGENT_INPUT_TOKEN") ?? string.Empty); // Should remove.
+                    Assert.Equal(hc.SecretMasker.MaskSecrets("some secret token value"), "***");
+                }
+                finally
+                {
+                    Environment.SetEnvironmentVariable("VSTS_AGENT_INPUT_TOKEN", null);
+                }
             }
         }
 
@@ -80,7 +135,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
                 var command = new CommandSettings(hc, args: new string[] { "remove" });
 
                 // Act.
-                bool actual = command.Unconfigure;
+                bool actual = command.Remove;
 
                 // Assert.
                 Assert.True(actual);
@@ -192,6 +247,33 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
 
                 // Assert.
                 Assert.True(actual);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void GetsFlagUnattendedFromEnvVar()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                try
+                {
+                    // Arrange.
+                    Environment.SetEnvironmentVariable("VSTS_AGENT_INPUT_UNATTENDED", "true");
+                    var command = new CommandSettings(hc, args: new string[0]);
+
+                    // Act.
+                    bool actual = command.Unattended;
+
+                    // Assert.
+                    Assert.Equal(true, actual);
+                    Assert.Equal(string.Empty, Environment.GetEnvironmentVariable("VSTS_AGENT_INPUT_UNATTENDED") ?? string.Empty); // Should remove.
+                }
+                finally
+                {
+                    Environment.SetEnvironmentVariable("VSTS_AGENT_INPUT_UNATTENDED", null);
+                }
             }
         }
 
@@ -549,7 +631,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
                     .Returns("some windows logon account");
 
                 // Act.
-                string actual = command.GetWindowsLogonAccount("some default account");
+                string actual = command.GetWindowsLogonAccount("some default account", StringUtil.Loc("WindowsLogonAccountNameDescription"));
 
                 // Assert.
                 Assert.Equal("some windows logon account", actual);
@@ -676,7 +758,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
         [Fact]
         [Trait("Level", "L0")]
         [Trait("Category", nameof(CommandSettings))]
-        public void GetsFlagDeploymentAgent()
+        public void GetsFlagDeploymentAgentWithBackCompat()
         {
             using (TestHostContext hc = CreateTestContext())
             {
@@ -684,7 +766,61 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
                 var command = new CommandSettings(hc, args: new string[] { "--machinegroup" });
 
                 // Act.
-                bool actual = command.MachineGroup;
+                bool actual = command.DeploymentGroup;
+
+                // Assert.
+                Assert.True(actual);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void GetsFlagDeploymentAgent()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                // Arrange.
+                var command = new CommandSettings(hc, args: new string[] { "--deploymentgroup" });
+
+                // Act.
+                bool actual = command.DeploymentGroup;
+
+                // Assert.
+                Assert.True(actual);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void GetsFlagAddDeploymentGroupTagsBackCompat()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                // Arrange.
+                var command = new CommandSettings(hc, args: new string[] { "--addmachinegrouptags" });
+
+                // Act.
+                bool actual = command.GetDeploymentGroupTagsRequired();
+
+                // Assert.
+                Assert.True(actual);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void GetsFlagAddDeploymentGroupTags()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                // Arrange.
+                var command = new CommandSettings(hc, args: new string[] { "--adddeploymentgrouptags" });
+
+                // Act.
+                bool actual = command.GetDeploymentGroupTagsRequired();
 
                 // Assert.
                 Assert.True(actual);
@@ -748,7 +884,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
         [Fact]
         [Trait("Level", "L0")]
         [Trait("Category", nameof(CommandSettings))]
-        public void PromptsForMachineGroupName()
+        public void PromptsForDeploymentGroupName()
         {
             using (TestHostContext hc = CreateTestContext())
             {
@@ -756,19 +892,147 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
                 var command = new CommandSettings(hc, args: new string[0]);
                 _promptManager
                     .Setup(x => x.ReadValue(
-                        Constants.Agent.CommandLine.Args.MachineGroupName, // argName
-                        StringUtil.Loc("MachineGroupName"), // description
+                        Constants.Agent.CommandLine.Args.DeploymentGroupName, // argName
+                        StringUtil.Loc("DeploymentGroupName"), // description
                         false, // secret
                         string.Empty, // defaultValue
                         Validators.NonEmptyValidator, // validator
                         false)) // unattended
-                    .Returns("Test Machine Group");
+                    .Returns("Test Deployment Group");
 
                 // Act.
-                string actual = command.GetMachineGroupName();
+                string actual = command.GetDeploymentGroupName();
 
                 // Assert.
-                Assert.Equal("Test Machine Group", actual);
+                Assert.Equal("Test Deployment Group", actual);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void PromptsForDeploymentPoolName()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                // Arrange.
+                var command = new CommandSettings(hc, args: new string[0]);
+                _promptManager
+                    .Setup(x => x.ReadValue(
+                        Constants.Agent.CommandLine.Args.DeploymentPoolName, // argName
+                        StringUtil.Loc("DeploymentPoolName"), // description
+                        false, // secret
+                        string.Empty, // defaultValue
+                        Validators.NonEmptyValidator, // validator
+                        false)) // unattended
+                    .Returns("Test Deployment Pool Name");
+
+                // Act.
+                string actual = command.GetDeploymentPoolName();
+
+                // Assert.
+                Assert.Equal("Test Deployment Pool Name", actual);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void DeploymentGroupNameBackCompat()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                // Arrange.
+                var command = new CommandSettings(
+                              hc,
+                              new[]
+                              {
+                                  "--machinegroupname", "Test-MachineGroupName",
+                                  "--deploymentgroupname", "Test-DeploymentGroupName"
+                              });
+                _promptManager.Setup(x => x.ReadValue(
+                        Constants.Agent.CommandLine.Args.DeploymentGroupName, // argName
+                        StringUtil.Loc("DeploymentGroupName"), // description
+                        false, // secret
+                        string.Empty, // defaultValue
+                        Validators.NonEmptyValidator, // validator
+                        false)) // unattended
+                    .Returns("This Method should not get called!");
+
+                // Act.
+                string actual = command.GetDeploymentGroupName();
+
+                // Validate if --machinegroupname parameter is working
+                Assert.Equal("Test-MachineGroupName", actual);
+                
+                // Validate Read Value should not get invoked.
+                _promptManager.Verify(x =>
+                    x.ReadValue(It.IsAny<string>(), It.IsAny<string>(),
+                        It.IsAny<bool>(), It.IsAny<string>(), It.IsAny<Func<string, bool>>(), It.IsAny<bool>()), Times.Never);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void PromptsForDeploymentGroupTags()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                // Arrange.
+                var command = new CommandSettings(hc, args: new string[0]);
+                _promptManager
+                    .Setup(x => x.ReadValue(
+                        Constants.Agent.CommandLine.Args.DeploymentGroupTags, // argName
+                        StringUtil.Loc("DeploymentGroupTags"), // description
+                        false, // secret
+                        string.Empty, // defaultValue
+                        Validators.NonEmptyValidator, // validator
+                        false)) // unattended
+                    .Returns("Test-Tag1,Test-Tg2");
+
+                // Act.
+                string actual = command.GetDeploymentGroupTags();
+
+                // Assert.
+                Assert.Equal("Test-Tag1,Test-Tg2", actual);
+            }
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", nameof(CommandSettings))]
+        public void DeploymentGroupTagsBackCompat()
+        {
+            using (TestHostContext hc = CreateTestContext())
+            {
+                // Arrange.
+                var command = new CommandSettings(
+                              hc,
+                              new[]
+                              {
+                                  "--machinegrouptags", "Test-MachineGrouptag1,Test-MachineGrouptag2",
+                                  "--deploymentgrouptags", "Test-DeploymentGrouptag1,Test-DeploymentGrouptag2"
+                              });
+                _promptManager.Setup(x => x.ReadValue(
+                        Constants.Agent.CommandLine.Args.DeploymentGroupTags, // argName
+                        StringUtil.Loc("DeploymentGroupTags"), // description
+                        false, // secret
+                        string.Empty, // defaultValue
+                        Validators.NonEmptyValidator, // validator
+                        false)) // unattended
+                    .Returns("This Method should not get called!");
+
+                // Act.
+                string actual = command.GetDeploymentGroupTags();
+
+                // Validate if --machinegrouptags parameter is working fine
+                Assert.Equal("Test-MachineGrouptag1,Test-MachineGrouptag2", actual);
+                
+                // Validate Read Value should not get invoked.
+                _promptManager.Verify(x =>
+                    x.ReadValue(It.IsAny<string>(), It.IsAny<string>(),
+                        It.IsAny<bool>(),It.IsAny<string>(), It.IsAny<Func<string,bool>>(),It.IsAny<bool>()), Times.Never);
             }
         }
 
@@ -841,7 +1105,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
         {
             TestHostContext hc = new TestHostContext(this, testName);
             hc.SetSingleton<IPromptManager>(_promptManager.Object);
-            hc.SetSingleton<ISecretMasker>(_secretMasker.Object);
             return hc;
         }
     }

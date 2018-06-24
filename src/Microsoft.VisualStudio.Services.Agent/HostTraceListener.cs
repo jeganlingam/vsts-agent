@@ -10,6 +10,7 @@ namespace Microsoft.VisualStudio.Services.Agent
     public sealed class HostTraceListener : TextWriterTraceListener
     {
         private const string _logFileNamingPattern = "{0}_{1:yyyyMMdd-HHmmss}-utc.log";
+        private string _logFileDirectory;
         private string _logFilePrefix;
         private bool _enablePageLog = false;
         private bool _enableLogRetention = false;
@@ -17,11 +18,15 @@ namespace Microsoft.VisualStudio.Services.Agent
         private int _pageSizeLimit;
         private int _retentionDays;
 
-        public HostTraceListener(string logFilePrefix, int pageSizeLimit, int retentionDays)
+        public HostTraceListener(string logFileDirectory, string logFilePrefix, int pageSizeLimit, int retentionDays)
             : base()
         {
+            ArgUtil.NotNullOrEmpty(logFileDirectory, nameof(logFileDirectory));
             ArgUtil.NotNullOrEmpty(logFilePrefix, nameof(logFilePrefix));
+            _logFileDirectory = logFileDirectory;
             _logFilePrefix = logFilePrefix;
+
+            Directory.CreateDirectory(_logFileDirectory);
 
             if (pageSizeLimit > 0)
             {
@@ -157,23 +162,29 @@ namespace Microsoft.VisualStudio.Services.Agent
 
         private StreamWriter CreatePageLogWriter()
         {
-            string diagDirectory = IOUtil.GetDiagPath();
-            Directory.CreateDirectory(diagDirectory);
             if (_enableLogRetention)
             {
-                DirectoryInfo diags = new DirectoryInfo(diagDirectory);
+                DirectoryInfo diags = new DirectoryInfo(_logFileDirectory);
                 var logs = diags.GetFiles($"{_logFilePrefix}*.log");
                 foreach (var log in logs)
                 {
                     if (log.LastWriteTimeUtc.AddDays(_retentionDays) < DateTime.UtcNow)
                     {
-                        log.Delete();
+                        try
+                        {
+                            log.Delete();
+                        }
+                        catch (Exception)
+                        {
+                            // catch Exception and continue
+                            // we shouldn't block logging and fail the agent if the agent can't delete an older log file.
+                        }
                     }
                 }
             }
 
             string fileName = StringUtil.Format(_logFileNamingPattern, _logFilePrefix, DateTime.UtcNow);
-            string logFile = Path.Combine(diagDirectory, fileName);
+            string logFile = Path.Combine(_logFileDirectory, fileName);
             Stream logStream;
             if (File.Exists(logFile))
             {

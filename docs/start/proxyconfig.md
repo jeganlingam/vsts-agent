@@ -19,13 +19,13 @@
   2. If your proxy requires additionally authentication, you will need to provide that credential to vsts agent through environment variables. We will treate the proxy credential as sensitive information and mask it in any job logs or agent diag logs.  
   
   **Set following environment variables before configure and run vsts agent.**  
-  ###Windows  
+### Windows  
   ```batch
   set VSTS_HTTP_PROXY_USERNAME=proxyuser
   set VSTS_HTTP_PROXY_PASSWORD=proxypassword
   ```  
    
-  ###Unix and OSX  
+### Unix and OSX  
   ```bash
   export VSTS_HTTP_PROXY_USERNAME=proxyuser
   export VSTS_HTTP_PROXY_PASSWORD=proxypassword
@@ -39,7 +39,7 @@
   [Details here](nixsvc.md#setting-the-environment)
   
 ## Limitations  
-  - Only agent infustructure itself has proxy support, which means the agent is able to run a Build/Release job behind proxy. However, you still have to setup proxy config for each individual tool that agent invoke during a Build/Release job.  
+  - Only agent infrastructure itself has proxy support, which means the agent is able to run a Build/Release job behind proxy. However, you still have to setup proxy config for each individual tool that agent invoke during a Build/Release job.  
     Ex, 
       - proxy config for git.
       - proxy config for any tasks that make REST call. (We will add built-in proxy support to task lib.)

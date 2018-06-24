@@ -33,8 +33,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
         public TestRunData ReadResults(IExecutionContext executionContext, string filePath, TestRunContext runContext)
         {
             _executionContext = executionContext;
-            _attachmentLocation = Path.Combine(Path.GetDirectoryName(filePath), Path.GetFileNameWithoutExtension(filePath), "In");
-            _executionContext.Debug(string.Format(CultureInfo.InvariantCulture, "Attachment location: {0}", _attachmentLocation));
 
             _definitions = new Dictionary<string, TestCaseDefinition>();
 
@@ -75,11 +73,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
             DateTime runFinishDate = DateTime.MinValue;
             if (node != null && node.Attributes["start"] != null && node.Attributes["finish"] != null)
             {
-                if (DateTime.TryParse(node.Attributes["start"].Value, DateTimeFormatInfo.InvariantInfo,DateTimeStyles.None, out runStartDate))
+                if (DateTime.TryParse(node.Attributes["start"].Value, DateTimeFormatInfo.InvariantInfo,DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out runStartDate))
                 {
                     _executionContext.Debug(string.Format(CultureInfo.InvariantCulture, "Setting run start and finish times."));
                     //Only if there is a valid start date.
-                    DateTime.TryParse(node.Attributes["finish"].Value, DateTimeFormatInfo.InvariantInfo,DateTimeStyles.None, out runFinishDate);
+                    DateTime.TryParse(node.Attributes["finish"].Value, DateTimeFormatInfo.InvariantInfo,DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out runFinishDate);
                     if (runFinishDate < runStartDate)
                     {
                         runFinishDate = runStartDate = DateTime.MinValue;
@@ -102,6 +100,20 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
                 releaseUri: runContext.ReleaseUri,
                 releaseEnvironmentUri: runContext.ReleaseEnvironmentUri
                 );
+
+            //Parse the Deployment node for the runDeploymentRoot - this is the attachment root. Required for .NET Core
+            XmlNode deploymentNode = doc.SelectSingleNode("/TestRun/TestSettings/Deployment");
+            var _attachmentRoot = string.Empty;
+            if (deploymentNode != null && deploymentNode.Attributes["runDeploymentRoot"] != null )
+            {
+                _attachmentRoot = deploymentNode.Attributes["runDeploymentRoot"].Value;
+            }
+            else
+            {
+                _attachmentRoot = Path.GetFileNameWithoutExtension(filePath); // This for platform v1
+            }
+            _attachmentLocation = Path.Combine(Path.GetDirectoryName(filePath), _attachmentRoot, "In");
+            _executionContext.Debug(string.Format(CultureInfo.InvariantCulture, "Attachment location: {0}", _attachmentLocation));
 
             AddRunLevelAttachments(filePath, doc, testRunData);
 
@@ -129,6 +141,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
                     {
                         IdentityRef ownerIdRef = new IdentityRef();
                         ownerIdRef.DisplayName = ownerNode.Attributes["name"].Value;
+                        ownerIdRef.DirectoryAlias = ownerNode.Attributes["name"].Value;
                         owner = ownerIdRef;
                     }
 
@@ -154,12 +167,15 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
                 }
             }
 
-            // Read UnitTestResults as well as WebTestResults
+            // Read UnitTestResults, WebTestResults and OrderedTestResults
             XmlNodeList resultsNodes = doc.SelectNodes("/TestRun/Results/UnitTestResult");
             XmlNodeList webTestResultNodes = doc.SelectNodes("/TestRun/Results/WebTestResult");
+            XmlNodeList orderedTestResultNodes = doc.SelectNodes("/TestRun/Results/TestResultAggregation");
 
             results.AddRange(ReadActualResults(resultsNodes, "UnitTest"));
             results.AddRange(ReadActualResults(webTestResultNodes, "WebTest"));
+            results.AddRange(ReadActualResults(orderedTestResultNodes, "OrderedTest"));
+
 
             testRunData.Results = results.ToArray<TestCaseResultData>();
             _executionContext.Debug(string.Format(CultureInfo.InvariantCulture, "Total test results: {0}", testRunData.Results.Length));
@@ -275,11 +291,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
                 DateTime startedDate;
                 if (resultNode.Attributes["startTime"] != null && resultNode.Attributes["startTime"].Value != null)
                 {
-                    DateTime.TryParse(resultNode.Attributes["startTime"].Value, DateTimeFormatInfo.InvariantInfo, DateTimeStyles.None, out startedDate);
+                    DateTime.TryParse(resultNode.Attributes["startTime"].Value, DateTimeFormatInfo.InvariantInfo, DateTimeStyles.AssumeUniversal | DateTimeStyles.AdjustToUniversal, out startedDate);
                 }
                 else
                 {
-                    startedDate = DateTime.Now;
+                    startedDate = DateTime.UtcNow;
                 }
                 resultCreateModel.StartedDate = startedDate;
 
@@ -293,6 +309,10 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
                 else if (string.Equals(resultNode.Attributes["outcome"].Value, "passed", StringComparison.OrdinalIgnoreCase))
                 {
                     resultCreateModel.Outcome = TestOutcome.Passed.ToString();
+                }
+                else if (string.Equals(resultNode.Attributes["outcome"].Value, "inconclusive", StringComparison.OrdinalIgnoreCase))
+                {
+                    resultCreateModel.Outcome = TestOutcome.Inconclusive.ToString();
                 }
                 else
                 {                    
@@ -371,7 +391,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
 
                 if (resultCreateModel.Outcome.Equals("Failed"))
                 {
-                    XmlNode errorMessage, errorStackTrace, consoleLog;
+                    XmlNode errorMessage, errorStackTrace, consoleLog, standardError;
 
                     if ((errorMessage = resultNode.SelectSingleNode("./Output/ErrorInfo/Message")) != null && !string.IsNullOrWhiteSpace(errorMessage.InnerText))
                     {
@@ -388,6 +408,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
                     if ((consoleLog = resultNode.SelectSingleNode("./Output/StdOut")) != null && !string.IsNullOrWhiteSpace(consoleLog.InnerText))
                     {
                         resultCreateModel.ConsoleLog = consoleLog.InnerText;
+                    }
+
+                    // standard error
+                    if ((standardError = resultNode.SelectSingleNode("./Output/StdErr")) != null && !string.IsNullOrWhiteSpace(standardError.InnerText))
+                    {
+                        resultCreateModel.StandardError = standardError.InnerText;
                     }
                 }
 

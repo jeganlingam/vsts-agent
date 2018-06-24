@@ -8,6 +8,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using System.Runtime.Loader;
 using System.Reflection;
+using System.Collections.Generic;
+using Microsoft.TeamFoundation.DistributedTask.Logging;
+using System.Net.Http.Headers;
 
 namespace Microsoft.VisualStudio.Services.Agent.Tests
 {
@@ -18,13 +21,17 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
         private readonly ITraceManager _traceManager;
         private readonly Terminal _term;
         private readonly SecretMasker _secretMasker;
+        private CancellationTokenSource _agentShutdownTokenSource = new CancellationTokenSource();
         private string _suiteName;
         private string _testName;
         private Tracing _trace;
         private AssemblyLoadContext _loadContext;
-
+        private string _tempDirectoryRoot = Path.Combine(Path.GetTempPath(), Guid.NewGuid().ToString("D"));
+        private StartupType _startupType;
         public event EventHandler Unloading;
-
+        public CancellationToken AgentShutdownToken => _agentShutdownTokenSource.Token;
+        public ShutdownReason AgentShutdownReason { get; private set; }
+        public ISecretMasker SecretMasker => _secretMasker;
         public TestHostContext(object testClass, [CallerMemberName] string testName = "")
         {
             ArgUtil.NotNull(testClass, nameof(testClass));
@@ -35,12 +42,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
 
             // Trim the test assembly's root namespace from the test class's full name.
             _suiteName = testClass.GetType().FullName.Substring(
-                startIndex: typeof(Tests.Program).FullName.LastIndexOf(nameof(Program)));
+                startIndex: typeof(Tests.TestHostContext).FullName.LastIndexOf(nameof(TestHostContext)));
             _suiteName = _suiteName.Replace(".", "_");
 
             // Setup the trace manager.
             TraceFileName = Path.Combine(
-                IOUtil.GetBinPath(),
+                Path.Combine(TestUtil.GetSrcPath(), "Test", "TestLogs"),
                 $"trace_{_suiteName}_{_testName}.log");
             if (File.Exists(TraceFileName))
             {
@@ -49,9 +56,10 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
 
             var traceListener = new HostTraceListener(TraceFileName);
             _secretMasker = new SecretMasker();
+            _secretMasker.AddValueEncoder(ValueEncoders.JsonStringEscape);
+            _secretMasker.AddValueEncoder(ValueEncoders.UriDataEscape);
             _traceManager = new TraceManager(traceListener, _secretMasker);
             _trace = GetTrace(nameof(TestHostContext));
-            SetSingleton<ISecretMasker>(_secretMasker);
 
             // inject a terminal in silent mode so all console output
             // goes to the test trace file
@@ -59,18 +67,41 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
             _term.Silent = true;
             SetSingleton<ITerminal>(_term);
             EnqueueInstance<ITerminal>(_term);
+
+#if !OS_WINDOWS
+            string eulaFile = Path.Combine(GetDirectory(WellKnownDirectory.Externals), Constants.Path.TeeDirectory, "license.html");
+            Directory.CreateDirectory(GetDirectory(WellKnownDirectory.Externals));
+            Directory.CreateDirectory(Path.Combine(GetDirectory(WellKnownDirectory.Externals), Constants.Path.TeeDirectory));
+            File.WriteAllText(eulaFile, "testeulafile");
+#endif
         }
 
         public CultureInfo DefaultCulture { get; private set; }
 
+        public RunMode RunMode { get; set; }
+
         public string TraceFileName { get; private set; }
+
+        public StartupType StartupType
+        {
+            get
+            {
+                return _startupType;
+            }
+            set
+            {
+                _startupType = value;
+            }
+        }
+
+        public ProductInfoHeaderValue UserAgent => new ProductInfoHeaderValue("L0Test", "0.0");
 
         public async Task Delay(TimeSpan delay, CancellationToken token)
         {
             await Task.Delay(TimeSpan.Zero);
         }
 
-        public T CreateService<T>() where T: class, IAgentService
+        public T CreateService<T>() where T : class, IAgentService
         {
             _trace.Verbose($"Create service: '{typeof(T).Name}'");
 
@@ -136,7 +167,155 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
 
         public string GetDirectory(WellKnownDirectory directory)
         {
-            throw new Exception("TODO: USE A NEW RANDOM TEMP DIR FOR EACH TEST. TEST-HOST-CONTEXT TEARDOWN CAN CLEANUP THE DIRECTORY");
+            string path;
+            switch (directory)
+            {
+                case WellKnownDirectory.Bin:
+                    path = Path.GetDirectoryName(Assembly.GetEntryAssembly().Location);
+                    break;
+
+                case WellKnownDirectory.Diag:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        Constants.Path.DiagDirectory);
+                    break;
+
+                case WellKnownDirectory.Externals:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        Constants.Path.ExternalsDirectory);
+                    break;
+
+                case WellKnownDirectory.LegacyPSHost:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Externals),
+                        Constants.Path.LegacyPSHostDirectory);
+                    break;
+
+                case WellKnownDirectory.Root:
+                    path = new DirectoryInfo(GetDirectory(WellKnownDirectory.Bin)).Parent.FullName;
+                    break;
+
+                case WellKnownDirectory.ServerOM:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Externals),
+                        Constants.Path.ServerOMDirectory);
+                    break;
+
+                case WellKnownDirectory.Tee:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Externals),
+                        Constants.Path.TeeDirectory);
+                    break;
+
+                case WellKnownDirectory.Tasks:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Work),
+                        Constants.Path.TasksDirectory);
+                    break;
+
+                case WellKnownDirectory.Update:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Work),
+                        Constants.Path.UpdateDirectory);
+                    break;
+
+                case WellKnownDirectory.Work:
+                    path = Path.Combine(
+                        _tempDirectoryRoot,
+                        WellKnownDirectory.Work.ToString());
+                    break;
+
+                default:
+                    throw new NotSupportedException($"Unexpected well known directory: '{directory}'");
+            }
+
+            _trace.Info($"Well known directory '{directory}': '{path}'");
+            return path;
+        }
+
+        public string GetConfigFile(WellKnownConfigFile configFile)
+        {
+            string path;
+            switch (configFile)
+            {
+                case WellKnownConfigFile.Agent:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".agent");
+                    break;
+
+                case WellKnownConfigFile.Credentials:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".credentials");
+                    break;
+
+                case WellKnownConfigFile.RSACredentials:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".credentials_rsaparams");
+                    break;
+
+                case WellKnownConfigFile.Service:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".service");
+                    break;
+
+                case WellKnownConfigFile.CredentialStore:
+#if OS_OSX
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".credential_store.keychain");
+#else
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".credential_store");
+#endif
+                    break;
+
+                case WellKnownConfigFile.Certificates:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".certificates");
+                    break;
+
+                case WellKnownConfigFile.Proxy:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".proxy");
+                    break;
+
+                case WellKnownConfigFile.ProxyCredentials:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".proxycredentials");
+                    break;
+
+                case WellKnownConfigFile.ProxyBypass:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".proxybypass");
+                    break;
+
+                case WellKnownConfigFile.Autologon:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".autologon");
+                    break;
+
+                case WellKnownConfigFile.Options:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".options");
+                    break;
+                default:
+                    throw new NotSupportedException($"Unexpected well known config file: '{configFile}'");
+            }
+
+            _trace.Info($"Well known config file '{configFile}': '{path}'");
+            return path;
         }
 
         // simple convenience factory so each suite/test gets a different trace file per run
@@ -150,6 +329,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
         public Tracing GetTrace(string name)
         {
             return _traceManager[name];
+        }
+
+        public void ShutdownAgent(ShutdownReason reason)
+        {
+            ArgUtil.NotNull(reason, nameof(reason));
+            AgentShutdownReason = reason;
+            _agentShutdownTokenSource.Cancel();
         }
 
         public void Dispose()
@@ -168,6 +354,14 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
                     _loadContext = null;
                 }
                 _traceManager?.Dispose();
+                try
+                {
+                    Directory.Delete(_tempDirectoryRoot);
+                }
+                catch (Exception)
+                {
+                    // eat exception on dispose
+                }
             }
         }
 

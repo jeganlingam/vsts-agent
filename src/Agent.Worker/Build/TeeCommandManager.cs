@@ -4,6 +4,7 @@ using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text;
+using System.Threading;
 using System.Threading.Tasks;
 using System.Xml.Serialization;
 
@@ -15,13 +16,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 
         protected override string Switch => "-";
 
-        public string FilePath => Path.Combine(IOUtil.GetExternalsPath(), Constants.Path.TeeDirectory, "tf");
+        public string FilePath => Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Externals), Constants.Path.TeeDirectory, "tf");
 
         // TODO: Remove AddAsync after last-saved-checkin-metadata problem is fixed properly.
         public async Task AddAsync(string localPath)
         {
             ArgUtil.NotNullOrEmpty(localPath, nameof(localPath));
-            await RunPorcelainCommandAsync(FormatFlags.All, "add", localPath);
+            await RunPorcelainCommandAsync(FormatFlags.OmitCollectionUrl, "add", localPath);
         }
 
         public void CleanupProxySetting()
@@ -43,7 +44,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
         public string ResolvePath(string serverPath)
         {
             ArgUtil.NotNullOrEmpty(serverPath, nameof(serverPath));
-            string localPath = RunPorcelainCommandAsync("resolvePath", $"-workspace:{WorkspaceName}", serverPath).GetAwaiter().GetResult();
+            string localPath = RunPorcelainCommandAsync(true, "resolvePath", $"-workspace:{WorkspaceName}", serverPath).GetAwaiter().GetResult();
             localPath = localPath?.Trim();
 
             // Paths outside of the root mapping return empty.
@@ -71,6 +72,53 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             }
         }
 
+        public void SetupClientCertificate(string clientCert, string clientCertKey, string clientCertArchive, string clientCertPassword)
+        {
+            ExecutionContext.Debug("Convert client certificate from 'pkcs' format to 'jks' format.");
+            string toolPath = WhichUtil.Which("keytool", true, Trace);
+            string jksFile = Path.Combine(ExecutionContext.Variables.Agent_TempDirectory, $"{Guid.NewGuid()}.jks");
+            string argLine;
+            if (!string.IsNullOrEmpty(clientCertPassword))
+            {
+                argLine = $"-importkeystore -srckeystore \"{clientCertArchive}\" -srcstoretype pkcs12 -destkeystore \"{jksFile}\" -deststoretype JKS -srcstorepass \"{clientCertPassword}\" -deststorepass \"{clientCertPassword}\"";
+            }
+            else
+            {
+                argLine = $"-importkeystore -srckeystore \"{clientCertArchive}\" -srcstoretype pkcs12 -destkeystore \"{jksFile}\" -deststoretype JKS";
+            }
+
+            ExecutionContext.Command($"{toolPath} {argLine}");
+
+            var processInvoker = HostContext.CreateService<IProcessInvoker>();
+            processInvoker.OutputDataReceived += (object sender, ProcessDataReceivedEventArgs args) =>
+            {
+                if (!string.IsNullOrEmpty(args.Data))
+                {
+                    ExecutionContext.Output(args.Data);
+                }
+            };
+            processInvoker.ErrorDataReceived += (object sender, ProcessDataReceivedEventArgs args) =>
+            {
+                if (!string.IsNullOrEmpty(args.Data))
+                {
+                    ExecutionContext.Output(args.Data);
+                }
+            };
+
+            processInvoker.ExecuteAsync(ExecutionContext.Variables.System_DefaultWorkingDirectory, toolPath, argLine, null, true, CancellationToken.None).GetAwaiter().GetResult();
+
+            if (!string.IsNullOrEmpty(clientCertPassword))
+            {
+                ExecutionContext.Debug($"Set TF_ADDITIONAL_JAVA_ARGS=-Djavax.net.ssl.keyStore={jksFile} -Djavax.net.ssl.keyStorePassword={clientCertPassword}");
+                AdditionalEnvironmentVariables["TF_ADDITIONAL_JAVA_ARGS"] = $"-Djavax.net.ssl.keyStore={jksFile} -Djavax.net.ssl.keyStorePassword={clientCertPassword}";
+            }
+            else
+            {
+                ExecutionContext.Debug($"Set TF_ADDITIONAL_JAVA_ARGS=-Djavax.net.ssl.keyStore={jksFile}");
+                AdditionalEnvironmentVariables["TF_ADDITIONAL_JAVA_ARGS"] = $"-Djavax.net.ssl.keyStore={jksFile}";
+            }
+        }
+
         public async Task ShelveAsync(string shelveset, string commentFile, bool move)
         {
             ArgUtil.NotNullOrEmpty(shelveset, nameof(shelveset));
@@ -89,7 +137,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
         public async Task<ITfsVCShelveset> ShelvesetsAsync(string shelveset)
         {
             ArgUtil.NotNullOrEmpty(shelveset, nameof(shelveset));
-            string xml = await RunPorcelainCommandAsync("shelvesets", "-format:xml", $"-workspace:{WorkspaceName}", shelveset);
+            string output = await RunPorcelainCommandAsync("shelvesets", "-format:xml", $"-workspace:{WorkspaceName}", shelveset);
+            string xml = ExtractXml(output);
 
             // Deserialize the XML.
             // The command returns a non-zero exit code if the shelveset is not found.
@@ -109,7 +158,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
         public async Task<ITfsVCStatus> StatusAsync(string localPath)
         {
             ArgUtil.NotNullOrEmpty(localPath, nameof(localPath));
-            string xml = await RunPorcelainCommandAsync(FormatFlags.OmitCollectionUrl, "status", "-recursive", "-nodetect", "-format:xml", localPath);
+            string output = await RunPorcelainCommandAsync(FormatFlags.OmitCollectionUrl, "status", "-recursive", "-nodetect", "-format:xml", localPath);
+            string xml = ExtractXml(output);
             var serializer = new XmlSerializer(typeof(TeeStatus));
             using (var reader = new StringReader(xml ?? string.Empty))
             {
@@ -232,7 +282,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             args.Add("-format:xml");
 
             // Run the command.
-            TfsVCPorcelainCommandResult result = await TryRunPorcelainCommandAsync(FormatFlags.None, args.ToArray());
+            TfsVCPorcelainCommandResult result = await TryRunPorcelainCommandAsync(FormatFlags.None, false, args.ToArray());
             ArgUtil.NotNull(result, nameof(result));
             if (result.Exception != null)
             {
@@ -249,13 +299,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             }
 
             // Note, string.join gracefully handles a null element within the IEnumerable<string>.
-            string xml = string.Join(Environment.NewLine, result.Output ?? new List<string>()) ?? string.Empty;
-
-            // The command returns a non-XML message preceeding the XML if there are no workspaces.
-            if (!xml.StartsWith("<?xml"))
-            {
-                return null;
-            }
+            string output = string.Join(Environment.NewLine, result.Output ?? new List<string>()) ?? string.Empty;
+            string xml = ExtractXml(output);
 
             // Deserialize the XML.
             var serializer = new XmlSerializer(typeof(TeeWorkspaces));
@@ -272,6 +317,24 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
         {
             ArgUtil.NotNull(workspace, nameof(workspace));
             await RunCommandAsync("workspace", $"-remove:{workspace.Name};{workspace.Owner}");
+        }
+
+        private static string ExtractXml(string output)
+        {
+            // tf commands that output XML, may contain information messages preceeding the XML content.
+            //
+            // For example, the workspaces subcommand returns a non-XML message preceeding the XML when there are no workspaces.
+            //
+            // Also for example, when JAVA_TOOL_OPTIONS is set, a message like "Picked up JAVA_TOOL_OPTIONS: -Dfile.encoding=UTF8"
+            // may preceed the XML content.
+            output = output ?? string.Empty;
+            int xmlIndex = output.IndexOf("<?xml");
+            if (xmlIndex > 0)
+            {
+                return output.Substring(xmlIndex);
+            }
+
+            return output;
         }
 
         ////////////////////////////////////////////////////////////////////////////////

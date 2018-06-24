@@ -58,7 +58,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
                 _buildDirectoryManager.PrepareDirectory(_ec.Object, _endpoint, _sourceProvider.Object);
 
                 // Assert.
-                _trackingManager.Verify(x => x.Create(_ec.Object, _endpoint, HashKey, _trackingFile));
+                _trackingManager.Verify(x => x.Create(_ec.Object, _endpoint, HashKey, _trackingFile, false));
             }
         }
 
@@ -75,7 +75,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
 
                 // Assert.
                 _trackingManager.Verify(x => x.LoadIfExists(_ec.Object, _trackingFile));
-                _trackingManager.Verify(x => x.Create(_ec.Object, _endpoint, HashKey, _trackingFile));
+                _trackingManager.Verify(x => x.Create(_ec.Object, _endpoint, HashKey, _trackingFile, false));
                 _trackingManager.Verify(x => x.MarkForGarbageCollection(_ec.Object, _existingConfig));
             }
         }
@@ -208,9 +208,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
 
             // Create a random work path.
             var configStore = new Mock<IConfigurationStore>();
-            _workFolder = Path.Combine(
-                Path.GetDirectoryName(Assembly.GetEntryAssembly().Location),
-                $"_work_{Path.GetRandomFileName()}");
+            _workFolder = hc.GetDirectory(WellKnownDirectory.Work);
             var settings = new AgentSettings() { WorkFolder = _workFolder };
             configStore.Setup(x => x.GetSettings()).Returns(settings);
             hc.SetSingleton<IConfigurationStore>(configStore.Object);
@@ -218,7 +216,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             // Setup the execution context.
             _ec = new Mock<IExecutionContext>();
             List<string> warnings;
-            _variables = new Variables(hc, new Dictionary<string, string>(), new List<MaskHint>(), out warnings);
+            _variables = new Variables(hc, new Dictionary<string, VariableValue>(), out warnings);
             _variables.Set(Constants.Variables.System.CollectionId, CollectionId);
             _variables.Set(Constants.Variables.System.DefinitionId, DefinitionId);
             _variables.Set(Constants.Variables.Build.Clean, $"{cleanOption}");
@@ -282,7 +280,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.Build
             if (existingConfigKind == ExistingConfigKind.None || existingConfigKind == ExistingConfigKind.Nonmatching)
             {
                 _trackingManager
-                    .Setup(x => x.Create(_ec.Object, _endpoint, HashKey, _trackingFile))
+                    .Setup(x => x.Create(_ec.Object, _endpoint, HashKey, _trackingFile, false))
                     .Returns(_newConfig);
                 if (existingConfigKind == ExistingConfigKind.Nonmatching)
                 {

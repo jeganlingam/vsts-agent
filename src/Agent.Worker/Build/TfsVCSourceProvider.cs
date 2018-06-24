@@ -16,7 +16,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
     {
         private bool _undoShelvesetPendingChanges = false;
 
-        public override string RepositoryType => WellKnownRepositoryTypes.TfsVersionControl;
+        public override string RepositoryType => RepositoryTypes.TfsVersionControl;
 
         public async Task GetSourceAsync(
             IExecutionContext executionContext,
@@ -30,12 +30,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 
 #if OS_WINDOWS
             // Validate .NET Framework 4.6 or higher is installed.
-            //
-            // Note, system.NoVerifyNet46 is a temporary variable to bypass .NET 4.6 validation.
-            // Remove this variable after we have more confidence in this validation check.
-            var netFrameworkUtil = HostContext.GetService<INetFrameworkUtil>();
-            if (!(executionContext.Variables.GetBoolean("system.noVerifyNet46") ?? false) &&
-                !netFrameworkUtil.Test(new Version(4, 6)))
+            if (!NetFrameworkUtil.Test(new Version(4, 6), Trace))
             {
                 throw new Exception(StringUtil.Loc("MinimumNetFramework46"));
             }
@@ -48,19 +43,47 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             tf.ExecutionContext = executionContext;
 
             // Setup proxy.
-            if (!string.IsNullOrEmpty(executionContext.Variables.Agent_ProxyUrl))
+            var agentProxy = HostContext.GetService<IVstsAgentWebProxy>();
+            if (!string.IsNullOrEmpty(executionContext.Variables.Agent_ProxyUrl) && !agentProxy.WebProxy.IsBypassed(endpoint.Url))
             {
                 executionContext.Debug($"Configure '{tf.FilePath}' to work through proxy server '{executionContext.Variables.Agent_ProxyUrl}'.");
                 tf.SetupProxy(executionContext.Variables.Agent_ProxyUrl, executionContext.Variables.Agent_ProxyUsername, executionContext.Variables.Agent_ProxyPassword);
             }
 
+            // Setup client certificate.
+            var agentCertManager = HostContext.GetService<IAgentCertificateManager>();
+            if (agentCertManager.SkipServerCertificateValidation)
+            {
+#if OS_WINDOWS
+                executionContext.Debug("TF.exe does not support ignore SSL certificate validation error.");
+#else
+                executionContext.Debug("TF does not support ignore SSL certificate validation error.");
+#endif
+            }
+
+            var configUrl = new Uri(HostContext.GetService<IConfigurationStore>().GetSettings().ServerUrl);
+            if (!string.IsNullOrEmpty(agentCertManager.ClientCertificateFile) &&
+                Uri.Compare(endpoint.Url, configUrl, UriComponents.SchemeAndServer, UriFormat.Unescaped, StringComparison.OrdinalIgnoreCase) == 0)
+            {
+                executionContext.Debug($"Configure '{tf.FilePath}' to work with client cert '{agentCertManager.ClientCertificateFile}'.");
+                tf.SetupClientCertificate(agentCertManager.ClientCertificateFile, agentCertManager.ClientCertificatePrivateKeyFile, agentCertManager.ClientCertificateArchiveFile, agentCertManager.ClientCertificatePassword);
+            }
+
             // Add TF to the PATH.
             string tfPath = tf.FilePath;
             ArgUtil.File(tfPath, nameof(tfPath));
-            var varUtil = HostContext.GetService<IVarUtil>();
             executionContext.Output(StringUtil.Loc("Prepending0WithDirectoryContaining1", Constants.PathVariable, Path.GetFileName(tfPath)));
-            varUtil.PrependPath(Path.GetDirectoryName(tfPath));
+            PathUtil.PrependPath(Path.GetDirectoryName(tfPath));
             executionContext.Debug($"{Constants.PathVariable}: '{Environment.GetEnvironmentVariable(Constants.PathVariable)}'");
+
+#if OS_WINDOWS
+            // Set TFVC_BUILDAGENT_POLICYPATH
+            string policyDllPath = Path.Combine(HostContext.GetDirectory(WellKnownDirectory.ServerOM), "Microsoft.TeamFoundation.VersionControl.Controls.dll");
+            ArgUtil.File(policyDllPath, nameof(policyDllPath));
+            const string policyPathEnvKey = "TFVC_BUILDAGENT_POLICYPATH";
+            executionContext.Output(StringUtil.Loc("SetEnvVar", policyPathEnvKey));
+            Environment.SetEnvironmentVariable(policyPathEnvKey, policyDllPath);
+#endif
 
             // Check if the administrator accepted the license terms of the TEE EULA when configuring the agent.
             AgentSettings settings = HostContext.GetService<IConfigurationStore>().GetSettings();
@@ -105,7 +128,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 
             // Get the definition mappings.
             DefinitionWorkspaceMapping[] definitionMappings =
-                JsonConvert.DeserializeObject<DefinitionWorkspaceMappings>(endpoint.Data[WellKnownEndpointData.TfvcWorkspaceMapping])?.Mappings;
+                JsonConvert.DeserializeObject<DefinitionWorkspaceMappings>(endpoint.Data[EndpointData.TfvcWorkspaceMapping])?.Mappings;
 
             // Determine the sources directory.
             string sourcesDirectory = GetEndpointData(endpoint, Constants.EndpointData.SourcesDirectory);
@@ -114,8 +137,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             // Attempt to re-use an existing workspace if the command manager supports scorch
             // or if clean is not specified.
             ITfsVCWorkspace existingTFWorkspace = null;
-            bool clean = endpoint.Data.ContainsKey(WellKnownEndpointData.Clean) &&
-                StringUtil.ConvertToBoolean(endpoint.Data[WellKnownEndpointData.Clean], defaultValue: false);
+            bool clean = endpoint.Data.ContainsKey(EndpointData.Clean) &&
+                StringUtil.ConvertToBoolean(endpoint.Data[EndpointData.Clean], defaultValue: false);
             if (tf.Features.HasFlag(TfsVCFeatures.Scorch) || !clean)
             {
                 existingTFWorkspace = WorkspaceUtil.MatchExactWorkspace(
@@ -294,7 +317,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
                         string firstLocalDirectory =
                             (definitionMappings ?? new DefinitionWorkspaceMapping[0])
                             .Where(x => x.MappingType == DefinitionMappingType.Map)
-                            .Select( x=> x.GetRootedLocalPath(sourcesDirectory))
+                            .Select(x => x.GetRootedLocalPath(sourcesDirectory))
                             .FirstOrDefault(x => Directory.Exists(x));
                         if (firstLocalDirectory == null)
                         {
@@ -382,7 +405,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             }
 
             // Cleanup proxy settings.
-            if (!string.IsNullOrEmpty(executionContext.Variables.Agent_ProxyUrl))
+            if (!string.IsNullOrEmpty(executionContext.Variables.Agent_ProxyUrl) && !agentProxy.WebProxy.IsBypassed(endpoint.Url))
             {
                 executionContext.Debug($"Remove proxy setting for '{tf.FilePath}' to work through proxy server '{executionContext.Variables.Agent_ProxyUrl}'.");
                 tf.CleanupProxySetting();
@@ -404,7 +427,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 
                 // Get the definition mappings.
                 DefinitionWorkspaceMapping[] definitionMappings =
-                    JsonConvert.DeserializeObject<DefinitionWorkspaceMappings>(endpoint.Data[WellKnownEndpointData.TfvcWorkspaceMapping])?.Mappings;
+                    JsonConvert.DeserializeObject<DefinitionWorkspaceMappings>(endpoint.Data[EndpointData.TfvcWorkspaceMapping])?.Mappings;
 
                 // Determine the sources directory.
                 string sourcesDirectory = GetEndpointData(endpoint, Constants.EndpointData.SourcesDirectory);
@@ -501,6 +524,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             endpoint.Data.Add(Constants.EndpointData.SourceTfvcShelveset, executionContext.Variables.Get(Constants.Variables.Build.SourceTfvcShelveset));
             endpoint.Data.Add(Constants.EndpointData.GatedShelvesetName, executionContext.Variables.Get(Constants.Variables.Build.GatedShelvesetName));
             endpoint.Data.Add(Constants.EndpointData.GatedRunCI, executionContext.Variables.Get(Constants.Variables.Build.GatedRunCI));
+        }
+
+        public sealed override bool TestOverrideBuildDirectory()
+        {
+            var configurationStore = HostContext.GetService<IConfigurationStore>();
+            AgentSettings settings = configurationStore.GetSettings();
+            return settings.IsHosted;
         }
 
         private async Task RemoveConflictingWorkspacesAsync(ITfsVCCommandManager tf, ITfsVCWorkspace[] tfWorkspaces, string name, string directory)

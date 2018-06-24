@@ -20,15 +20,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
         private string _codeCoverageTool;
         private string _reportDirectory;
 
+        public HostTypes SupportedHostTypes => HostTypes.Build;
+
         public void ProcessCommand(IExecutionContext context, Command command)
         {
             if (string.Equals(command.Event, WellKnownResultsCommand.PublishCodeCoverage, StringComparison.OrdinalIgnoreCase))
             {
                 ProcessPublishCodeCoverageCommand(context, command.Properties);
-            }
-            else if (string.Equals(command.Event, WellKnownResultsCommand.EnableCodeCoverage, StringComparison.OrdinalIgnoreCase))
-            {
-                ProcessEnableCodeCoverageCommand(context, command.Properties);
             }
             else
             {
@@ -52,45 +50,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
             }
         }
 
-        #region enable code coverage helper methods
-        private void ProcessEnableCodeCoverageCommand(IExecutionContext context, Dictionary<string, string> eventProperties)
-        {
-            string codeCoverageTool;
-            eventProperties.TryGetValue(EnableCodeCoverageEventProperties.CodeCoverageTool, out codeCoverageTool);
-            if (string.IsNullOrWhiteSpace(codeCoverageTool))
-            {
-                // no code coverage tool specified. Dont enable code coverage.
-                return;
-            }
-            codeCoverageTool = codeCoverageTool.Trim();
-
-            string buildTool;
-            eventProperties.TryGetValue(EnableCodeCoverageEventProperties.BuildTool, out buildTool);
-            if (string.IsNullOrEmpty(buildTool))
-            {
-                throw new ArgumentException(StringUtil.Loc("ArgumentNeeded", "BuildTool"));
-            }
-            buildTool = buildTool.Trim();
-
-            var codeCoverageInputs = new CodeCoverageEnablerInputs(context, buildTool, eventProperties);
-            ICodeCoverageEnabler ccEnabler = GetCodeCoverageEnabler(buildTool, codeCoverageTool);
-            ccEnabler.EnableCodeCoverage(context, codeCoverageInputs);
-        }
-
-        private ICodeCoverageEnabler GetCodeCoverageEnabler(string buildTool, string codeCoverageTool)
-        {
-            var extensionManager = HostContext.GetService<IExtensionManager>();
-            ICodeCoverageEnabler codeCoverageEnabler = (extensionManager.GetExtensions<ICodeCoverageEnabler>()).FirstOrDefault(
-                        x => x.Name.Equals(codeCoverageTool + "_" + buildTool, StringComparison.OrdinalIgnoreCase));
-
-            if (codeCoverageEnabler == null)
-            {
-                throw new ArgumentException(StringUtil.Loc("InvalidBuildOrCoverageTool", buildTool, codeCoverageTool));
-            }
-            return codeCoverageEnabler;
-        }
-        #endregion
-
         #region publish code coverage helper methods
         private void ProcessPublishCodeCoverageCommand(IExecutionContext context, Dictionary<string, string> eventProperties)
         {
@@ -104,7 +63,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
                 return;
             }
 
-            LoadPublishCodeCoverageInputs(eventProperties);
+            LoadPublishCodeCoverageInputs(context, eventProperties);
 
             string project = context.Variables.System_TeamProject;
 
@@ -124,7 +83,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
                 context.Warning(StringUtil.Loc("CodeCoverageDataIsNull"));
             }
 
-            VssConnection connection = WorkerUtilies.GetVssConnection(context);
+            VssConnection connection = WorkerUtilities.GetVssConnection(context);
             var codeCoveragePublisher = HostContext.GetService<ICodeCoveragePublisher>();
             codeCoveragePublisher.InitializePublisher(_buildId, connection);
 
@@ -134,8 +93,15 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
             context.AsyncCommands.Add(commandContext);
         }
 
-        private async Task PublishCodeCoverageAsync(IExecutionContext executionContext, IAsyncCommandContext commandContext, ICodeCoveragePublisher codeCoveragePublisher, IEnumerable<CodeCoverageStatistics> coverageData,
-                                                    string project, Guid projectId, long containerId, CancellationToken cancellationToken)
+        private async Task PublishCodeCoverageAsync(
+            IExecutionContext executionContext,
+            IAsyncCommandContext commandContext,
+            ICodeCoveragePublisher codeCoveragePublisher,
+            IEnumerable<CodeCoverageStatistics> coverageData,
+            string project,
+            Guid projectId,
+            long containerId,
+            CancellationToken cancellationToken)
         {
             //step 2: publish code coverage summary to TFS
             if (coverageData != null && coverageData.Count() > 0)
@@ -190,7 +156,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
 
                 await codeCoveragePublisher.PublishCodeCoverageFilesAsync(commandContext, projectId, containerId, filesToPublish, File.Exists(Path.Combine(newReportDirectory, CodeCoverageConstants.DefaultIndexFile)), cancellationToken);
             }
-            catch (IOException ex)
+            catch (Exception ex)
             {
                 executionContext.Warning(StringUtil.Loc("ErrorOccurredWhilePublishingCCFiles", ex.Message));
             }
@@ -241,14 +207,14 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
         {
             var hostType = context.Variables.System_HostType;
 
-            if (hostType != null && String.Equals(hostType.ToString(), "build", StringComparison.OrdinalIgnoreCase))
+            if (hostType.HasFlag(HostTypes.Build))
             {
                 return true;
             }
             return false;
         }
 
-        private void LoadPublishCodeCoverageInputs(Dictionary<string, string> eventProperties)
+        private void LoadPublishCodeCoverageInputs(IExecutionContext context, Dictionary<string, string> eventProperties)
         {
             //validate codecoverage tool input
             eventProperties.TryGetValue(PublishCodeCoverageEventProperties.CodeCoverageTool, out _codeCoverageTool);
@@ -263,14 +229,31 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
             {
                 throw new ArgumentException(StringUtil.Loc("ArgumentNeeded", "SummaryFile"));
             }
+            if (context.Container != null)
+            {
+                // Translate file path back from container path
+                _summaryFileLocation = context.Container.TranslateToHostPath(_summaryFileLocation);
+            }
 
             eventProperties.TryGetValue(PublishCodeCoverageEventProperties.ReportDirectory, out _reportDirectory);
+            if (context.Container != null)
+            {
+                // Translate file path back from container path
+                _reportDirectory = context.Container.TranslateToHostPath(_reportDirectory);
+            }
 
             string additionalFilesInput;
             eventProperties.TryGetValue(PublishCodeCoverageEventProperties.AdditionalCodeCoverageFiles, out additionalFilesInput);
             if (!string.IsNullOrEmpty(additionalFilesInput) && additionalFilesInput.Split(',').Count() > 0)
             {
-                _additionalCodeCoverageFiles = additionalFilesInput.Split(',').ToList<string>();
+                if (context.Container != null)
+                {
+                    _additionalCodeCoverageFiles = additionalFilesInput.Split(',').Select(x => context.Container.TranslateToHostPath(x)).ToList<string>();
+                }
+                else
+                {
+                    _additionalCodeCoverageFiles = additionalFilesInput.Split(',').ToList<string>();
+                }
             }
         }
 
@@ -280,7 +263,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
             var defaultIndexFile = Path.Combine(reportDirectory, CodeCoverageConstants.DefaultIndexFile);
             var htmIndexFile = Path.Combine(reportDirectory, CodeCoverageConstants.HtmIndexFile);
 
-            // if index.html doesnot exist and index.htm exists, copy the .html file from .htm file. Dont delete the .htm file as it might be referenced by other htm/html files.
+            // If index.html does not exist and index.htm exists, copy the .html file from .htm file.
+            // Don't delete the .htm file as it might be referenced by other .htm/.html files.
             if (!File.Exists(defaultIndexFile) && File.Exists(htmIndexFile))
             {
                 try
@@ -289,13 +273,14 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
                 }
                 catch (Exception ex)
                 {
-                    executionContext.Warning(StringUtil.Loc("RenameIndexFileCoberturaFailed", htmIndexFile, defaultIndexFile, _codeCoverageTool, ex.InnerException.ToString()));
+                    // In the warning text, prefer using ex.InnerException when available, for more-specific details
+                    executionContext.Warning(StringUtil.Loc("RenameIndexFileCoberturaFailed", htmIndexFile, defaultIndexFile, _codeCoverageTool, (ex.InnerException ?? ex).ToString()));
                 }
             }
         }
 
         /// <summary>
-        /// This method replaces the default index.html generated by cobertura with 
+        /// This method replaces the default index.html generated by cobertura with
         /// the non-framed version
         /// </summary>
         /// <param name="reportDirectory"></param>
@@ -303,18 +288,26 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage
         {
             try
             {
-                if (_codeCoverageTool.Equals("cobertura", StringComparison.OrdinalIgnoreCase) && File.Exists(Path.Combine(reportDirectory, CodeCoverageConstants.DefaultIndexFile)) && File.Exists(Path.Combine(reportDirectory, CodeCoverageConstants.DefaultNonFrameFileCobertura)))
+                string newIndexHtml = Path.Combine(reportDirectory, CodeCoverageConstants.NewIndexFile);
+                string indexHtml = Path.Combine(reportDirectory, CodeCoverageConstants.DefaultIndexFile);
+                string nonFrameHtml = Path.Combine(reportDirectory, CodeCoverageConstants.DefaultNonFrameFileCobertura);
+
+                if (_codeCoverageTool.Equals("cobertura", StringComparison.OrdinalIgnoreCase) &&
+                    File.Exists(indexHtml) &&
+                    File.Exists(nonFrameHtml))
                 {
                     // duplicating frame-summary.html to index.html and renaming index.html to newindex.html
-                    File.Move(sourceFileName: Path.Combine(reportDirectory, CodeCoverageConstants.DefaultIndexFile), destFileName: Path.Combine(reportDirectory, CodeCoverageConstants.NewIndexFile));
-                    File.Copy(sourceFileName: Path.Combine(reportDirectory, CodeCoverageConstants.DefaultNonFrameFileCobertura), destFileName: Path.Combine(reportDirectory, CodeCoverageConstants.DefaultIndexFile), overwrite: true);                                       
+                    File.Delete(newIndexHtml);
+                    File.Move(indexHtml, newIndexHtml);
+                    File.Copy(nonFrameHtml, indexHtml, overwrite: true);
                 }
             }
             catch (Exception ex)
             {
-                executionContext.Warning(StringUtil.Loc("RenameIndexFileCoberturaFailed", CodeCoverageConstants.DefaultNonFrameFileCobertura, CodeCoverageConstants.DefaultIndexFile, _codeCoverageTool, ex.InnerException.ToString()));               
+                // In the warning text, prefer using ex.InnerException when available, for more-specific details
+                executionContext.Warning(StringUtil.Loc("RenameIndexFileCoberturaFailed", CodeCoverageConstants.DefaultNonFrameFileCobertura, CodeCoverageConstants.DefaultIndexFile, _codeCoverageTool, (ex.InnerException ?? ex).ToString()));
             }
-        }   
+        }
 
         private string GetCoverageDirectory(string buildId, string directoryName)
         {

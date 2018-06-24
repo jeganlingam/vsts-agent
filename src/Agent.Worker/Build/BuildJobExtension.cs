@@ -9,39 +9,35 @@ using System.Threading.Tasks;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 {
-    public sealed class BuildJobExtension : AgentService, IJobExtension
+    public sealed class BuildJobExtension : JobExtension
     {
-        public Type ExtensionType => typeof(IJobExtension);
-        public string HostType => "build";
-        public IStep PrepareStep { get; private set; }
-        public IStep FinallyStep { get; private set; }
+        public override Type ExtensionType => typeof(IJobExtension);
+        public override HostTypes HostType => HostTypes.Build;
+
         private ServiceEndpoint SourceEndpoint { set; get; }
         private ISourceProvider SourceProvider { set; get; }
 
-        public BuildJobExtension()
+        public override IStep GetExtensionPreJobStep(IExecutionContext jobContext)
         {
-            PrepareStep = new JobExtensionRunner(
-                runAsync: PrepareAsync,
-                alwaysRun: false,
-                continueOnError: false,
-                critical: true,
+            return new JobExtensionRunner(
+                runAsync: GetSourceAsync,
+                condition: ExpressionManager.Succeeded,
                 displayName: StringUtil.Loc("GetSources"),
-                enabled: true,
-                @finally: false);
+                data: null);
+        }
 
-            FinallyStep = new JobExtensionRunner(
-                runAsync: FinallyAsync,
-                alwaysRun: false,
-                continueOnError: false,
-                critical: false,
+        public override IStep GetExtensionPostJobStep(IExecutionContext jobContext)
+        {
+            return new JobExtensionRunner(
+                runAsync: PostJobCleanupAsync,
+                condition: ExpressionManager.Always,
                 displayName: StringUtil.Loc("Cleanup"),
-                enabled: true,
-                @finally: true);
+                data: null);
         }
 
         // 1. use source provide to solve path, if solved result is rooted, return full path.
         // 2. prefix default path root (build.sourcesDirectory), if result is rooted, return full path.
-        public string GetRootedPath(IExecutionContext context, string path)
+        public override string GetRootedPath(IExecutionContext context, string path)
         {
             string rootedPath = null;
 
@@ -96,7 +92,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             return rootedPath;
         }
 
-        public void ConvertLocalPath(IExecutionContext context, string localPath, out string repoName, out string sourcePath)
+        public override void ConvertLocalPath(IExecutionContext context, string localPath, out string repoName, out string sourcePath)
         {
             repoName = "";
 
@@ -114,15 +110,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             }
         }
 
-        private async Task PrepareAsync()
+        // Prepare build directory
+        // Set all build related variables
+        public override void InitializeJobExtension(IExecutionContext executionContext)
         {
             // Validate args.
             Trace.Entering();
-            ArgUtil.NotNull(PrepareStep, nameof(PrepareStep));
-            ArgUtil.NotNull(PrepareStep.ExecutionContext, nameof(PrepareStep.ExecutionContext));
-            IExecutionContext executionContext = PrepareStep.ExecutionContext;
-            new JobPrepareValidator().Validate(HostType, executionContext.Variables.Build_BuildId ?? 0, Trace);
-            var directoryManager = HostContext.GetService<IBuildDirectoryManager>();
+            ArgUtil.NotNull(executionContext, nameof(executionContext));
 
             // This flag can be false for jobs like cleanup artifacts.
             // If syncSources = false, we will not set source related build variable, not create build folder, not sync source.
@@ -141,25 +135,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 
             executionContext.Debug($"Primary repository: {SourceEndpoint.Name}. repository type: {SourceProvider.RepositoryType}");
 
-            // Prepare the build directory.
-            executionContext.Debug("Preparing build directory.");
-            TrackingConfig trackingConfig = directoryManager.PrepareDirectory(
-                executionContext,
-                SourceEndpoint,
-                SourceProvider);
-
-            // Set the directory variables.
-            executionContext.Debug("Set build variables.");
-            string _workDirectory = IOUtil.GetWorkPath(HostContext);
-            executionContext.Variables.Set(Constants.Variables.Agent.BuildDirectory, Path.Combine(_workDirectory, trackingConfig.BuildDirectory));
-            executionContext.Variables.Set(Constants.Variables.System.ArtifactsDirectory, Path.Combine(_workDirectory, trackingConfig.ArtifactsDirectory));
-            executionContext.Variables.Set(Constants.Variables.System.DefaultWorkingDirectory, Path.Combine(_workDirectory, trackingConfig.SourcesDirectory));
-            executionContext.Variables.Set(Constants.Variables.Common.TestResultsDirectory, Path.Combine(_workDirectory, trackingConfig.TestResultsDirectory));
-            executionContext.Variables.Set(Constants.Variables.Build.BinariesDirectory, Path.Combine(_workDirectory, trackingConfig.BuildDirectory, Constants.Build.Path.BinariesDirectory));
-            executionContext.Variables.Set(Constants.Variables.Build.SourcesDirectory, Path.Combine(_workDirectory, trackingConfig.SourcesDirectory));
-            executionContext.Variables.Set(Constants.Variables.Build.StagingDirectory, Path.Combine(_workDirectory, trackingConfig.ArtifactsDirectory));
-            executionContext.Variables.Set(Constants.Variables.Build.ArtifactStagingDirectory, Path.Combine(_workDirectory, trackingConfig.ArtifactsDirectory));
-
             // Set the repo variables.
             string repositoryId;
             if (SourceEndpoint.Data.TryGetValue("repositoryId", out repositoryId)) // TODO: Move to const after source artifacts PR is merged.
@@ -170,10 +145,9 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             executionContext.Variables.Set(Constants.Variables.Build.RepoName, SourceEndpoint.Name);
             executionContext.Variables.Set(Constants.Variables.Build.RepoProvider, SourceEndpoint.Type);
             executionContext.Variables.Set(Constants.Variables.Build.RepoUri, SourceEndpoint.Url?.AbsoluteUri);
-            executionContext.Variables.Set(Constants.Variables.Build.RepoLocalPath, Path.Combine(_workDirectory, trackingConfig.SourcesDirectory));
 
             string checkoutSubmoduleText;
-            if (SourceEndpoint.Data.TryGetValue(WellKnownEndpointData.CheckoutSubmodules, out checkoutSubmoduleText))
+            if (SourceEndpoint.Data.TryGetValue(EndpointData.CheckoutSubmodules, out checkoutSubmoduleText))
             {
                 executionContext.Variables.Set(Constants.Variables.Build.RepoGitSubmoduleCheckout, checkoutSubmoduleText);
             }
@@ -182,18 +156,57 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             bool? repoClean = executionContext.Variables.GetBoolean(Constants.Variables.Build.RepoClean);
             if (repoClean != null)
             {
-                SourceEndpoint.Data[WellKnownEndpointData.Clean] = repoClean.Value.ToString();
+                SourceEndpoint.Data[EndpointData.Clean] = repoClean.Value.ToString();
             }
             else
             {
                 string cleanRepoText;
-                if (SourceEndpoint.Data.TryGetValue(WellKnownEndpointData.Clean, out cleanRepoText))
+                if (SourceEndpoint.Data.TryGetValue(EndpointData.Clean, out cleanRepoText))
                 {
                     executionContext.Variables.Set(Constants.Variables.Build.RepoClean, cleanRepoText);
                 }
             }
 
+            // Prepare the build directory.
+            executionContext.Output(StringUtil.Loc("PrepareBuildDir"));
+            var directoryManager = HostContext.GetService<IBuildDirectoryManager>();
+            TrackingConfig trackingConfig = directoryManager.PrepareDirectory(
+                executionContext,
+                SourceEndpoint,
+                SourceProvider);
+
+            // Set the directory variables.
+            executionContext.Output(StringUtil.Loc("SetBuildVars"));
+            string _workDirectory = HostContext.GetDirectory(WellKnownDirectory.Work);
+            executionContext.Variables.Set(Constants.Variables.Agent.BuildDirectory, Path.Combine(_workDirectory, trackingConfig.BuildDirectory));
+            executionContext.Variables.Set(Constants.Variables.System.ArtifactsDirectory, Path.Combine(_workDirectory, trackingConfig.ArtifactsDirectory));
+            executionContext.Variables.Set(Constants.Variables.System.DefaultWorkingDirectory, Path.Combine(_workDirectory, trackingConfig.SourcesDirectory));
+            executionContext.Variables.Set(Constants.Variables.Common.TestResultsDirectory, Path.Combine(_workDirectory, trackingConfig.TestResultsDirectory));
+            executionContext.Variables.Set(Constants.Variables.Build.BinariesDirectory, Path.Combine(_workDirectory, trackingConfig.BuildDirectory, Constants.Build.Path.BinariesDirectory));
+            executionContext.Variables.Set(Constants.Variables.Build.SourcesDirectory, Path.Combine(_workDirectory, trackingConfig.SourcesDirectory));
+            executionContext.Variables.Set(Constants.Variables.Build.StagingDirectory, Path.Combine(_workDirectory, trackingConfig.ArtifactsDirectory));
+            executionContext.Variables.Set(Constants.Variables.Build.ArtifactStagingDirectory, Path.Combine(_workDirectory, trackingConfig.ArtifactsDirectory));
+            executionContext.Variables.Set(Constants.Variables.Build.RepoLocalPath, Path.Combine(_workDirectory, trackingConfig.SourcesDirectory));
+
             SourceProvider.SetVariablesInEndpoint(executionContext, SourceEndpoint);
+        }
+
+        private async Task GetSourceAsync(IExecutionContext executionContext, object data)
+        {
+            // Validate args.
+            Trace.Entering();
+
+            // This flag can be false for jobs like cleanup artifacts.
+            // If syncSources = false, we will not set source related build variable, not create build folder, not sync source.
+            bool syncSources = executionContext.Variables.Build_SyncSources ?? true;
+            if (!syncSources)
+            {
+                Trace.Info($"{Constants.Variables.Build.SyncSources} = false, we will not set source related build variable, not create build folder and not sync source");
+                return;
+            }
+
+            ArgUtil.NotNull(SourceEndpoint, nameof(SourceEndpoint));
+            ArgUtil.NotNull(SourceProvider, nameof(SourceProvider));
 
             // Read skipSyncSource property fron endpoint data
             string skipSyncSourceText;
@@ -217,21 +230,26 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             }
         }
 
-        private async Task FinallyAsync()
+        private async Task PostJobCleanupAsync(IExecutionContext executionContext, object data)
         {
             // Validate args.
             Trace.Entering();
-            ArgUtil.NotNull(FinallyStep, nameof(FinallyStep));
-            ArgUtil.NotNull(FinallyStep.ExecutionContext, nameof(FinallyStep.ExecutionContext));
-            IExecutionContext executionContext = FinallyStep.ExecutionContext;
 
             // If syncSources = false, we will not reset repository.
             bool syncSources = executionContext.Variables.Build_SyncSources ?? true;
+            if (!syncSources)
+            {
+                Trace.Verbose($"{Constants.Variables.Build.SyncSources} = false, we will not run post job cleanup for this repository");
+                return;
+            }
+
+            ArgUtil.NotNull(SourceEndpoint, nameof(SourceEndpoint));
+            ArgUtil.NotNull(SourceProvider, nameof(SourceProvider));
 
             // Read skipSyncSource property fron endpoint data
             string skipSyncSourceText;
             bool skipSyncSource = false;
-            if (SourceEndpoint.Data.TryGetValue("skipSyncSource", out skipSyncSourceText))
+            if (SourceEndpoint != null && SourceEndpoint.Data.TryGetValue("skipSyncSource", out skipSyncSourceText))
             {
                 skipSyncSource = StringUtil.ConvertToBoolean(skipSyncSourceText, false);
             }
@@ -239,7 +257,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             // Prefer feature variable over endpoint data
             skipSyncSource = executionContext.Variables.GetBoolean(Constants.Variables.Features.SkipSyncSource) ?? skipSyncSource;
 
-            if (!syncSources || skipSyncSource)
+            if (skipSyncSource)
             {
                 Trace.Verbose($"{Constants.Variables.Build.SyncSources} = false, we will not run post job cleanup for this repository");
                 return;
@@ -254,7 +272,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             Trace.Entering();
             var extensionManager = HostContext.GetService<IExtensionManager>();
             List<ISourceProvider> sourceProviders = extensionManager.GetExtensions<ISourceProvider>();
-            foreach (ServiceEndpoint ep in executionContext.Endpoints)
+            foreach (ServiceEndpoint ep in executionContext.Endpoints.Where(e => e.Data.ContainsKey("repositoryId")))
             {
                 SourceProvider = sourceProviders
                     .FirstOrDefault(x => string.Equals(x.RepositoryType, ep.Type, StringComparison.OrdinalIgnoreCase));

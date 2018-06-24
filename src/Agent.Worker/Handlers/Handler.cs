@@ -4,44 +4,73 @@ using Microsoft.VisualStudio.Services.Agent.Util;
 using System;
 using System.Collections.Generic;
 using System.Threading.Tasks;
+using System.Linq;
+using System.IO;
+using Microsoft.VisualStudio.Services.WebApi;
+using Pipelines = Microsoft.TeamFoundation.DistributedTask.Pipelines;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker.Handlers
 {
     public interface IHandler : IAgentService
     {
+        List<ServiceEndpoint> Endpoints { get; set; }
+        Dictionary<string, string> Environment { get; set; }
         IExecutionContext ExecutionContext { get; set; }
+        IStepHost StepHost { get; set; }
         string FilePathInputRootDirectory { get; set; }
         Dictionary<string, string> Inputs { get; set; }
+        List<SecureFile> SecureFiles { get; set; }
         string TaskDirectory { get; set; }
-
+        Pipelines.TaskStepDefinitionReference Task { get; set; }
         Task RunAsync();
     }
 
     public abstract class Handler : AgentService
     {
-        protected IWorkerCommandManager CommandManager { get; private set; }
-        protected Dictionary<string, string> Environment { get; private set; }
+#if OS_WINDOWS
+        // In windows OS the maximum supported size of a environment variable value is 32k.
+        // You can set environment variable greater then 32K, but that variable will not be able to read in node.exe.
+        private const int _environmentVariableMaximumSize = 32766;
+#endif
 
+        protected IWorkerCommandManager CommandManager { get; private set; }
+
+        public List<ServiceEndpoint> Endpoints { get; set; }
+        public Dictionary<string, string> Environment { get; set; }
         public IExecutionContext ExecutionContext { get; set; }
+        public IStepHost StepHost { get; set; }
         public string FilePathInputRootDirectory { get; set; }
         public Dictionary<string, string> Inputs { get; set; }
+        public List<SecureFile> SecureFiles { get; set; }
         public string TaskDirectory { get; set; }
+        public Pipelines.TaskStepDefinitionReference Task { get; set; }
 
         public override void Initialize(IHostContext hostContext)
         {
             base.Initialize(hostContext);
             CommandManager = hostContext.GetService<IWorkerCommandManager>();
-            Environment = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
         }
 
         protected void AddEndpointsToEnvironment()
         {
             Trace.Entering();
+            ArgUtil.NotNull(Endpoints, nameof(Endpoints));
             ArgUtil.NotNull(ExecutionContext, nameof(ExecutionContext));
             ArgUtil.NotNull(ExecutionContext.Endpoints, nameof(ExecutionContext.Endpoints));
 
+            List<ServiceEndpoint> endpoints;
+            if ((ExecutionContext.Variables.GetBoolean(Constants.Variables.Agent.AllowAllEndpoints) ?? false) ||
+                string.Equals(System.Environment.GetEnvironmentVariable("AGENT_ALLOWALLENDPOINTS") ?? string.Empty, bool.TrueString, StringComparison.OrdinalIgnoreCase))
+            {
+                endpoints = ExecutionContext.Endpoints; // todo: remove after sprint 120 or so
+            }
+            else
+            {
+                endpoints = Endpoints;
+            }
+
             // Add the endpoints to the environment variable dictionary.
-            foreach (ServiceEndpoint endpoint in ExecutionContext.Endpoints)
+            foreach (ServiceEndpoint endpoint in endpoints)
             {
                 ArgUtil.NotNull(endpoint, nameof(endpoint));
 
@@ -50,12 +79,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Handlers
                 {
                     partialKey = endpoint.Id.ToString();
                 }
-                else if (string.Equals(endpoint.Name, ServiceEndpoints.SystemVssConnection, StringComparison.OrdinalIgnoreCase))
+                else if (string.Equals(endpoint.Name, WellKnownServiceEndpointNames.SystemVssConnection, StringComparison.OrdinalIgnoreCase))
                 {
-                    partialKey = ServiceEndpoints.SystemVssConnection.ToUpperInvariant();
+                    partialKey = WellKnownServiceEndpointNames.SystemVssConnection.ToUpperInvariant();
                 }
                 else if (endpoint.Data == null ||
-                    !endpoint.Data.TryGetValue(WellKnownEndpointData.RepositoryId, out partialKey) ||
+                    !endpoint.Data.TryGetValue(EndpointData.RepositoryId, out partialKey) ||
                     string.IsNullOrEmpty(partialKey))
                 {
                     continue; // This should never happen.
@@ -101,6 +130,39 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Handlers
             }
         }
 
+        protected void AddSecureFilesToEnvironment()
+        {
+            Trace.Entering();
+            ArgUtil.NotNull(ExecutionContext, nameof(ExecutionContext));
+            ArgUtil.NotNull(SecureFiles, nameof(SecureFiles));
+
+            List<SecureFile> secureFiles;
+            if ((ExecutionContext.Variables.GetBoolean(Constants.Variables.Agent.AllowAllSecureFiles) ?? false) ||
+                string.Equals(System.Environment.GetEnvironmentVariable("AGENT_ALLOWALLSECUREFILES") ?? string.Empty, bool.TrueString, StringComparison.OrdinalIgnoreCase))
+            {
+                secureFiles = ExecutionContext.SecureFiles ?? new List<SecureFile>(0); // todo: remove after sprint 121 or so
+            }
+            else
+            {
+                secureFiles = SecureFiles;
+            }
+
+            // Add the secure files to the environment variable dictionary.
+            foreach (SecureFile secureFile in secureFiles)
+            {
+                if (secureFile != null && secureFile.Id != Guid.Empty)
+                {
+                    string partialKey = secureFile.Id.ToString();
+                    AddEnvironmentVariable(
+                        key: $"SECUREFILE_NAME_{partialKey}",
+                        value: secureFile.Name);
+                    AddEnvironmentVariable(
+                        key: $"SECUREFILE_TICKET_{partialKey}",
+                        value: secureFile.Ticket);
+                }
+            }
+        }
+
         protected void AddInputsToEnvironment()
         {
             // Validate args.
@@ -135,7 +197,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Handlers
                 }
 
                 // Add the variable using the formatted name.
-                string formattedKey = (pair.Key ?? string.Empty).Replace('.', '_').ToUpperInvariant();
+                string formattedKey = (pair.Key ?? string.Empty).Replace('.', '_').Replace(' ', '_').ToUpperInvariant();
                 AddEnvironmentVariable(formattedKey, pair.Value);
 
                 // Store the name.
@@ -145,7 +207,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Handlers
             // Add the public variable names.
             if (!excludeNames)
             {
-                AddEnvironmentVariable("VSTS_PUBLIC_VARIABLES", StringUtil.ConvertToJson(names));
+                AddEnvironmentVariable("VSTS_PUBLIC_VARIABLES", JsonUtility.ToString(names));
             }
 
             if (!excludeSecrets)
@@ -155,7 +217,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Handlers
                 foreach (KeyValuePair<string, string> pair in ExecutionContext.Variables.Private)
                 {
                     // Add the variable using the formatted name.
-                    string formattedKey = (pair.Key ?? string.Empty).Replace('.', '_').ToUpperInvariant();
+                    string formattedKey = (pair.Key ?? string.Empty).Replace('.', '_').Replace(' ', '_').ToUpperInvariant();
                     AddEnvironmentVariable($"SECRET_{formattedKey}", pair.Value);
 
                     // Store the name.
@@ -165,7 +227,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Handlers
                 // Add the secret variable names.
                 if (!excludeNames)
                 {
-                    AddEnvironmentVariable("VSTS_SECRET_VARIABLES", StringUtil.ConvertToJson(secretNames));
+                    AddEnvironmentVariable("VSTS_SECRET_VARIABLES", JsonUtility.ToString(secretNames));
                 }
             }
         }
@@ -174,7 +236,58 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Handlers
         {
             ArgUtil.NotNullOrEmpty(key, nameof(key));
             Trace.Verbose($"Setting env '{key}' to '{value}'.");
+
             Environment[key] = value ?? string.Empty;
+
+#if OS_WINDOWS
+            if (Environment[key].Length > _environmentVariableMaximumSize)
+            {
+                ExecutionContext.Warning(StringUtil.Loc("EnvironmentVariableExceedsMaximumLength", key, value.Length, _environmentVariableMaximumSize));
+            }
+#endif
+        }
+
+        protected void AddTaskVariablesToEnvironment()
+        {
+            // Validate args.
+            Trace.Entering();
+            ArgUtil.NotNull(ExecutionContext.TaskVariables, nameof(ExecutionContext.TaskVariables));
+
+            foreach (KeyValuePair<string, string> pair in ExecutionContext.TaskVariables.Public)
+            {
+                // Add the variable using the formatted name.
+                string formattedKey = (pair.Key ?? string.Empty).Replace('.', '_').Replace(' ', '_').ToUpperInvariant();
+                AddEnvironmentVariable($"VSTS_TASKVARIABLE_{formattedKey}", pair.Value);
+            }
+
+            foreach (KeyValuePair<string, string> pair in ExecutionContext.TaskVariables.Private)
+            {
+                // Add the variable using the formatted name.
+                string formattedKey = (pair.Key ?? string.Empty).Replace('.', '_').Replace(' ', '_').ToUpperInvariant();
+                AddEnvironmentVariable($"VSTS_TASKVARIABLE_{formattedKey}", pair.Value);
+            }
+        }
+
+        protected void AddPrependPathToEnvironment()
+        {
+            // Validate args.
+            Trace.Entering();
+            ArgUtil.NotNull(ExecutionContext.PrependPath, nameof(ExecutionContext.PrependPath));
+            if (ExecutionContext.PrependPath.Count == 0)
+            {
+                return;
+            }
+
+            // Prepend path.
+            string prepend = string.Join(Path.PathSeparator.ToString(), ExecutionContext.PrependPath.Reverse<string>());
+            string taskEnvPATH;
+            Environment.TryGetValue(Constants.PathVariable, out taskEnvPATH);
+            string originalPath = ExecutionContext.Variables.Get(Constants.PathVariable) ?? // Prefer a job variable.
+                taskEnvPATH ?? // Then a task-environment variable.
+                System.Environment.GetEnvironmentVariable(Constants.PathVariable) ?? // Then an environment variable.
+                string.Empty;
+            string newPath = PathUtil.PrependPath(prepend, originalPath);
+            AddEnvironmentVariable(Constants.PathVariable, newPath);
         }
     }
 }

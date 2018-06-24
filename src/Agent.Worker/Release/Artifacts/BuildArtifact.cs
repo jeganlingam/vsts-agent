@@ -4,6 +4,7 @@ using System.Globalization;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
+using System.Security.Principal;
 
 using Microsoft.TeamFoundation.Build.WebApi;
 using Microsoft.TeamFoundation.DistributedTask.WebApi;
@@ -17,6 +18,8 @@ using Microsoft.VisualStudio.Services.ReleaseManagement.WebApi.Contracts;
 
 using Newtonsoft.Json;
 
+using Issue = Microsoft.TeamFoundation.DistributedTask.WebApi.Issue;
+using IssueType = Microsoft.TeamFoundation.DistributedTask.WebApi.IssueType;
 using ServerBuildArtifact = Microsoft.TeamFoundation.Build.WebApi.BuildArtifact;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
@@ -50,10 +53,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
             // Get the list of available artifacts from build. 
             executionContext.Output(StringUtil.Loc("RMPreparingToGetBuildArtifactList"));
 
-            var vssConnection = new VssConnection(buildArtifactDetails.TfsUrl, buildArtifactDetails.Credentials);
+            var vssConnection = VssUtil.CreateConnection(buildArtifactDetails.TfsUrl, buildArtifactDetails.Credentials);
             var buildClient = vssConnection.GetClient<BuildHttpClient>();
             var xamlBuildClient = vssConnection.GetClient<XamlBuildHttpClient>();
             List<ServerBuildArtifact> buildArtifacts = null;
+
+            EnsureVersionBelongsToLinkedDefinition(artifactDefinition, buildClient, xamlBuildClient);
 
             try
             {
@@ -64,10 +69,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
                 buildArtifacts = await xamlBuildClient.GetArtifactsAsync(buildArtifactDetails.Project, buildId);
             }
 
-            // No artifacts found in the build => Fail it. 
+            // No artifacts found in the build, add warning. 
             if (buildArtifacts == null || !buildArtifacts.Any())
             {
-                throw new ArtifactDownloadException(StringUtil.Loc("RMNoBuildArtifactsFound", buildId));
+                executionContext.Warning(StringUtil.Loc("RMNoBuildArtifactsFound", buildId));
+                return;
             }
 
             // DownloadFromStream each of the artifact sequentially. 
@@ -90,15 +96,20 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
         {
             Trace.Entering();
 
-            ServiceEndpoint vssEndpoint = context.Endpoints.FirstOrDefault(e => string.Equals(e.Name, ServiceEndpoints.SystemVssConnection, StringComparison.OrdinalIgnoreCase));
+            ServiceEndpoint vssEndpoint = context.Endpoints.FirstOrDefault(e => string.Equals(e.Name, WellKnownServiceEndpointNames.SystemVssConnection, StringComparison.OrdinalIgnoreCase));
             ArgUtil.NotNull(vssEndpoint, nameof(vssEndpoint));
             ArgUtil.NotNull(vssEndpoint.Url, nameof(vssEndpoint.Url));
 
             var artifactDetails = JsonConvert.DeserializeObject<Dictionary<string, string>>(agentArtifactDefinition.Details);
-            VssCredentials vssCredentials = ApiUtil.GetVssCredential(vssEndpoint);
+            VssCredentials vssCredentials = VssUtil.GetVssCredential(vssEndpoint);
             var tfsUrl = context.Variables.Get(WellKnownDistributedTaskVariables.TFCollectionUrl);
 
             Guid projectId = context.Variables.System_TeamProjectId ?? Guid.Empty;
+            if (artifactDetails.ContainsKey("Project"))
+            {
+                Guid.TryParse(artifactDetails["Project"], out projectId);
+            }
+
             ArgUtil.NotEmpty(projectId, nameof(projectId));
 
             string relativePath;
@@ -107,14 +118,26 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
 
             if (artifactDetails.TryGetValue("RelativePath", out relativePath))
             {
-                return new BuildArtifactDetails
+                var buildArtifactDetails = new BuildArtifactDetails
+                    {
+                        Credentials = vssCredentials,
+                        RelativePath = artifactDetails["RelativePath"],
+                        AccessToken = accessToken,
+                        Project = projectId.ToString(),
+                        TfsUrl = new Uri(tfsUrl)
+                    };
+
+                if (artifactDetails.ContainsKey("DefinitionName"))
                 {
-                    Credentials = vssCredentials,
-                    RelativePath = artifactDetails["RelativePath"],
-                    AccessToken = accessToken,
-                    Project = projectId.ToString(),
-                    TfsUrl = new Uri(tfsUrl),
-                };
+                    buildArtifactDetails.DefinitionName = artifactDetails["DefinitionName"];
+                }
+
+                if (artifactDetails.ContainsKey("DefinitionId"))
+                {
+                    buildArtifactDetails.DefintionId = Convert.ToInt32(artifactDetails["DefinitionId"], CultureInfo.InvariantCulture);
+                }
+
+                return buildArtifactDetails;
             }
             else
             {
@@ -146,10 +169,14 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
         {
             var downloadFolderPath = Path.Combine(localFolderPath, buildArtifact.Name);
             var buildArtifactDetails = artifactDefinition.Details as BuildArtifactDetails;
+
             if ((buildArtifact.Resource.Type == null && buildArtifact.Id == 0) // bug on build API Bug 378900
-                || string.Equals(buildArtifact.Resource.Type, WellKnownArtifactResourceTypes.FilePath, StringComparison.OrdinalIgnoreCase))
+                || string.Equals(buildArtifact.Resource.Type, ArtifactResourceTypes.FilePath, StringComparison.OrdinalIgnoreCase))
             {
-                executionContext.Output("Artifact Type: FileShare");
+                executionContext.Output(StringUtil.Loc("RMArtifactTypeFileShare"));
+#if !OS_WINDOWS
+                throw new NotSupportedException(StringUtil.Loc("RMFileShareArtifactErrorOnNonWindowsAgent"));
+#else
                 string fileShare;
                 if (buildArtifact.Id == 0)
                 {
@@ -170,20 +197,23 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
                 if (!Directory.Exists(fileShare))
                 {
                     // download path does not exist, raise exception
-                    throw new ArtifactDownloadException(StringUtil.Loc("RMArtifactDirectoryNotFoundError", fileShare));
+                    throw new ArtifactDownloadException(StringUtil.Loc("RMArtifactDirectoryNotFoundError", fileShare, WindowsIdentity.GetCurrent().Name));
                 }
 
-                executionContext.Output(StringUtil.Loc("RMDownloadingArtifactFromFileShare", fileShare));
+                executionContext.Output(StringUtil.Loc("RMDownloadingArtifactFromFileShare", fileShare, downloadFolderPath));
 
                 var fileShareArtifact = new FileShareArtifact();
                 await fileShareArtifact.DownloadArtifactAsync(executionContext, HostContext, artifactDefinition, fileShare, downloadFolderPath);
+#endif
             }
             else if (buildArtifactDetails != null
-                     && string.Equals(buildArtifact.Resource.Type, WellKnownArtifactResourceTypes.Container, StringComparison.OrdinalIgnoreCase))
+                     && string.Equals(buildArtifact.Resource.Type, ArtifactResourceTypes.Container, StringComparison.OrdinalIgnoreCase))
             {
-                executionContext.Output("Artifact Type: ServerDrop");
+                executionContext.Output(StringUtil.Loc("RMArtifactTypeServerDrop"));
+
                 // Get containerId and rootLocation for the artifact #/922702/drop
-                string[] parts = buildArtifact.Resource.Data.Split(new[] { '/' }, 3);
+                string containerUrl = buildArtifact.Resource.Data;
+                string[] parts = containerUrl.Split(new[] { '/' }, 3);
 
                 if (parts.Length < 3)
                 {
@@ -194,30 +224,63 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts
                 string rootLocation = parts[2];
                 if (!int.TryParse(parts[1], out containerId))
                 {
-                    throw new ArtifactDownloadException(StringUtil.Loc("RMArtifactContainerDetailsInvaidError", buildArtifact.Name));
+                    throw new ArtifactDownloadException(StringUtil.Loc("RMArtifactContainerDetailsInvalidError", buildArtifact.Name));
                 }
+
+                string rootDestinationDir = Path.Combine(localFolderPath, rootLocation);
+                executionContext.Output(StringUtil.Loc("RMDownloadingArtifactFromFileContainer", containerUrl, rootDestinationDir));
+
+                var containerFetchEngineOptions = new ContainerFetchEngineOptions
+                {
+                    ParallelDownloadLimit = executionContext.Variables.Release_Parallel_Download_Limit ?? ContainerFetchEngineDefaultOptions.ParallelDownloadLimit,
+                    DownloadBufferSize = executionContext.Variables.Release_Download_BufferSize ?? ContainerFetchEngineDefaultOptions.DownloadBufferSize
+                };
+
+                executionContext.Output(StringUtil.Loc("RMParallelDownloadLimit", containerFetchEngineOptions.ParallelDownloadLimit));
+                executionContext.Output(StringUtil.Loc("RMDownloadBufferSize", containerFetchEngineOptions.DownloadBufferSize));
 
                 IContainerProvider containerProvider =
                     new ContainerProviderFactory(buildArtifactDetails, rootLocation, containerId, executionContext).GetContainerProvider(
-                        WellKnownArtifactResourceTypes.Container);
-
-                string rootDestinationDir = Path.Combine(localFolderPath, rootLocation);
-                var containerFetchEngineOptions = new ContainerFetchEngineOptions
-                {
-                    ParallelDownloadLimit = 4,
-                    CancellationToken = executionContext.CancellationToken
-                };
+                        ArtifactResourceTypes.Container);
 
                 using (var engine = new ContainerFetchEngine.ContainerFetchEngine(containerProvider, rootLocation, rootDestinationDir))
                 {
                     engine.ContainerFetchEngineOptions = containerFetchEngineOptions;
                     engine.ExecutionLogger = new ExecutionLogger(executionContext);
-                    await engine.FetchAsync();
+                    await engine.FetchAsync(executionContext.CancellationToken);
                 }
             }
             else
             {
                 executionContext.Warning(StringUtil.Loc("RMArtifactTypeNotSupported", buildArtifact.Resource.Type));
+            }
+        }
+
+        private void EnsureVersionBelongsToLinkedDefinition(ArtifactDefinition artifactDefinition, BuildHttpClient buildClient, XamlBuildHttpClient xamlBuildClient)
+        {
+            var buildArtifactDetails = artifactDefinition.Details as BuildArtifactDetails;
+            if (buildArtifactDetails != null && buildArtifactDetails.DefintionId > 0)
+            {
+                var buildId = Convert.ToInt32(artifactDefinition.Version, CultureInfo.InvariantCulture);
+                TeamFoundation.Build.WebApi.Build build = null;
+
+                try
+                {
+                    build = buildClient.GetBuildAsync(buildArtifactDetails.Project, buildId).Result;
+                }
+                catch (AggregateException ex)
+                {
+                    if (ex.InnerException != null && ex.InnerException is BuildNotFoundException)
+                    {
+                        build = xamlBuildClient.GetBuildAsync(buildArtifactDetails.Project, buildId).Result;
+                    }
+                }
+
+                if (build != null && build.Definition.Id != buildArtifactDetails.DefintionId)
+                {
+                    string errorMessage = StringUtil.Loc("RMBuildNotFromLinkedDefinition", artifactDefinition.Name, buildArtifactDetails.DefinitionName);
+                    throw new ArtifactDownloadException(errorMessage);
+                }
             }
         }
     }

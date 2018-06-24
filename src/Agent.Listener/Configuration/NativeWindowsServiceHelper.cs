@@ -1,4 +1,6 @@
-#if OS_WINDOWS 
+#if OS_WINDOWS
+using Microsoft.VisualStudio.Services.Agent.Util;
+using Microsoft.Win32;
 using System;
 using System.Collections;
 using System.ComponentModel;
@@ -9,9 +11,7 @@ using System.Security;
 using System.Security.AccessControl;
 using System.Security.Principal;
 using System.ServiceProcess;
-
-using Microsoft.VisualStudio.Services.Agent.Util;
-using Microsoft.Win32;
+using System.Threading;
 
 namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
 {
@@ -40,6 +40,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
 
         NTAccount GetDefaultServiceAccount();
 
+        NTAccount GetDefaultAdminServiceAccount();
+
         bool IsServiceExists(string serviceName);
 
         void InstallService(string serviceName, string serviceDisplayName, string logonAccount, string logonPassword);
@@ -53,6 +55,20 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
         void CreateVstsAgentRegistryKey();
 
         void DeleteVstsAgentRegistryKey();
+
+        string GetSecurityId(string domainName, string userName);
+
+        void SetAutoLogonPassword(string password);
+
+        void ResetAutoLogonPassword();
+
+        bool IsRunningInElevatedMode();
+
+        void LoadUserProfile(string domain, string userName, string logonPassword, out IntPtr tokenHandle, out PROFILEINFO userProfile);
+
+        void UnloadUserProfile(IntPtr tokenHandle, PROFILEINFO userProfile);
+
+        bool IsValidAutoLogonCredential(string domain, string userName, string logonPassword);
     }
 
     public class NativeWindowsServiceHelper : AgentService, INativeWindowsServiceHelper
@@ -68,7 +84,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
 
         public string GetUniqueBuildGroupName()
         {
-            return AgentServiceLocalGroupPrefix + IOUtil.GetBinPathHash().Substring(0, 5);
+            return AgentServiceLocalGroupPrefix + IOUtil.GetPathHash(HostContext.GetDirectory(WellKnownDirectory.Bin)).Substring(0, 5);
         }
 
         // TODO: Make sure to remove Old agent's group and registry changes made during auto upgrade to vsts-agent.
@@ -362,32 +378,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
 
         public bool IsValidCredential(string domain, string userName, string logonPassword)
         {
-            Trace.Entering();
-            IntPtr tokenHandle = IntPtr.Zero;
+            return IsValidCredentialInternal(domain, userName, logonPassword, LOGON32_LOGON_NETWORK);
+        }
 
-            ArgUtil.NotNullOrEmpty(userName, nameof(userName));
-
-            Trace.Info($"Verify credential for account {userName}.");
-            int result = LogonUser(userName, domain, logonPassword, LOGON32_LOGON_NETWORK, LOGON32_PROVIDER_DEFAULT, out tokenHandle);
-
-            if (tokenHandle.ToInt32() != 0)
-            {
-                if (!CloseHandle(tokenHandle))
-                {
-                    Trace.Error("Failed during CloseHandle on token from LogonUser");
-                }
-            }
-
-            if (result != 0)
-            {
-                Trace.Info($"Credential for account '{userName}' is valid.");
-                return true;
-            }
-            else
-            {
-                Trace.Info($"Credential for account '{userName}' is invalid.");
-                return false;
-            }
+        public bool IsValidAutoLogonCredential(string domain, string userName, string logonPassword)
+        {
+            return IsValidCredentialInternal(domain, userName, logonPassword, LOGON32_LOGON_INTERACTIVE);
         }
 
         public NTAccount GetDefaultServiceAccount()
@@ -398,6 +394,19 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
             if (account == null)
             {
                 throw new InvalidOperationException(StringUtil.Loc("NetworkServiceNotFound"));
+            }
+
+            return account;
+        }
+
+        public NTAccount GetDefaultAdminServiceAccount()
+        {
+            SecurityIdentifier sid = new SecurityIdentifier(WellKnownSidType.LocalSystemSid, domainSid: null);
+            NTAccount account = sid.Translate(typeof(NTAccount)) as NTAccount;
+
+            if (account == null)
+            {
+                throw new InvalidOperationException(StringUtil.Loc("LocalSystemAccountNotFound"));
             }
 
             return account;
@@ -436,7 +445,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
         {
             Trace.Entering();
 
-            string agentServiceExecutable = Path.Combine(IOUtil.GetBinPath(), WindowsServiceControlManager.WindowsServiceControllerName);
+            string agentServiceExecutable = "\"" + Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Bin), WindowsServiceControlManager.WindowsServiceControllerName) + "\"";
             IntPtr scmHndl = IntPtr.Zero;
             IntPtr svcHndl = IntPtr.Zero;
             IntPtr tmpBuf = IntPtr.Zero;
@@ -444,6 +453,26 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
 
             try
             {
+                //invoke the service with special argument, that tells it to register an event log trace source (need to run as an admin)
+                using (var processInvoker = HostContext.CreateService<IProcessInvoker>())
+                {
+                    processInvoker.OutputDataReceived += delegate (object sender, ProcessDataReceivedEventArgs message)
+                    {
+                        _term.WriteLine(message.Data);
+                    };
+                    processInvoker.ErrorDataReceived += delegate (object sender, ProcessDataReceivedEventArgs message)
+                    {
+                        _term.WriteLine(message.Data);
+                    };
+
+                    processInvoker.ExecuteAsync(workingDirectory: string.Empty,
+                                                fileName: agentServiceExecutable,
+                                                arguments: "init",
+                                                environment: null,
+                                                requireExitCodeZero: true,
+                                                cancellationToken: CancellationToken.None).GetAwaiter().GetResult();
+                }
+
                 Trace.Verbose(StringUtil.Format("Trying to open SCManager."));
                 scmHndl = OpenSCManager(null, null, ServiceManagerRights.AllAccess);
                 if (scmHndl.ToInt64() <= 0)
@@ -468,12 +497,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
                 if (svcHndl.ToInt64() <= 0)
                 {
                     throw new InvalidOperationException(StringUtil.Loc("OperationFailed", nameof(CreateService), GetLastError()));
-                }
-
-                //invoke the service with special argument, that tells it to register an event log trace source (need to run as an admin)
-                using (var processInvoker = HostContext.CreateService<IProcessInvoker>())
-                {
-                    processInvoker.ExecuteAsync(string.Empty, agentServiceExecutable, "init", null, default(System.Threading.CancellationToken)).GetAwaiter().GetResult();
                 }
 
                 _term.WriteLine(StringUtil.Loc("ServiceInstalled", serviceName));
@@ -508,6 +531,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
                 // Move array into marshallable pointer
                 Marshal.Copy(actions, 0, tmpBuf, failureActions.Count * 2);
 
+                // Change service error actions
                 // Set the SERVICE_FAILURE_ACTIONS struct
                 SERVICE_FAILURE_ACTIONS sfa = new SERVICE_FAILURE_ACTIONS();
                 sfa.cActions = failureActions.Count;
@@ -517,9 +541,9 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
                 sfa.lpsaActions = tmpBuf.ToInt64();
 
                 // Call the ChangeServiceFailureActions() abstraction of ChangeServiceConfig2()
-                bool result = ChangeServiceFailureActions(svcHndl, SERVICE_CONFIG_FAILURE_ACTIONS, ref sfa);
+                bool falureActionsResult = ChangeServiceFailureActions(svcHndl, SERVICE_CONFIG_FAILURE_ACTIONS, ref sfa);
                 //Check the return
-                if (!result)
+                if (!falureActionsResult)
                 {
                     int lastErrorCode = (int)GetLastError();
                     Exception win32exception = new Win32Exception(lastErrorCode);
@@ -535,6 +559,31 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
                 else
                 {
                     _term.WriteLine(StringUtil.Loc("ServiceRecoveryOptionSet", serviceName));
+                }
+
+                // Change service to delayed auto start
+                SERVICE_DELAYED_AUTO_START_INFO sdasi = new SERVICE_DELAYED_AUTO_START_INFO();
+                sdasi.fDelayedAutostart = true;
+
+                // Call the ChangeServiceDelayedAutoStart() abstraction of ChangeServiceConfig2()
+                bool delayedStartResult = ChangeServiceDelayedAutoStart(svcHndl, SERVICE_CONFIG_DELAYED_AUTO_START_INFO, ref sdasi);
+                //Check the return
+                if (!delayedStartResult)
+                {
+                    int lastErrorCode = (int)GetLastError();
+                    Exception win32exception = new Win32Exception(lastErrorCode);
+                    if (lastErrorCode == ReturnCode.ERROR_ACCESS_DENIED)
+                    {
+                        throw new SecurityException(StringUtil.Loc("AccessDeniedSettingDelayedStartOption"), win32exception);
+                    }
+                    else
+                    {
+                        throw win32exception;
+                    }
+                }
+                else
+                {
+                    _term.WriteLine(StringUtil.Loc("ServiceDelayedStartOptionSet", serviceName));
                 }
 
                 _term.WriteLine(StringUtil.Loc("ServiceConfigured", serviceName));
@@ -703,10 +752,10 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
             {
                 using (RegistryKey vstsAgentsKey = tfsKey.CreateSubKey("VstsAgents"))
                 {
-                    String hash = IOUtil.GetBinPathHash();
+                    String hash = IOUtil.GetPathHash(HostContext.GetDirectory(WellKnownDirectory.Bin));
                     using (RegistryKey agentKey = vstsAgentsKey.CreateSubKey(hash))
                     {
-                        agentKey.SetValue("InstallPath", Path.Combine(IOUtil.GetBinPath(), "Agent.Listener.exe"));
+                        agentKey.SetValue("InstallPath", Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Bin), "Agent.Listener.exe"));
                     }
                 }
             }
@@ -728,7 +777,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
                     {
                         try
                         {
-                            String hash = IOUtil.GetBinPathHash();
+                            String hash = IOUtil.GetPathHash(HostContext.GetDirectory(WellKnownDirectory.Bin));
                             vstsAgentsKey.DeleteSubKeyTree(hash);
                         }
                         finally
@@ -741,6 +790,103 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
                 {
                     tfsKey.Dispose();
                 }
+            }
+        }
+
+        public string GetSecurityId(string domainName, string userName)
+        {
+            var account = new NTAccount(domainName, userName);
+            var sid = account.Translate(typeof(SecurityIdentifier));
+            return sid != null ? sid.ToString() : null;
+        }
+
+        public void SetAutoLogonPassword(string password)
+        {
+            using (LsaPolicy lsaPolicy = new LsaPolicy(LSA_AccessPolicy.POLICY_CREATE_SECRET))
+            {
+                lsaPolicy.SetSecretData(LsaPolicy.DefaultPassword, password);
+            }
+        }
+
+        public void ResetAutoLogonPassword()
+        {
+            using (LsaPolicy lsaPolicy = new LsaPolicy(LSA_AccessPolicy.POLICY_CREATE_SECRET))
+            {
+                lsaPolicy.SetSecretData(LsaPolicy.DefaultPassword, null);
+            }
+        }
+
+        public bool IsRunningInElevatedMode()
+        {
+            return new WindowsPrincipal(WindowsIdentity.GetCurrent()).IsInRole(WindowsBuiltInRole.Administrator);
+        }
+
+        public void LoadUserProfile(string domain, string userName, string logonPassword, out IntPtr tokenHandle, out PROFILEINFO userProfile)
+        {
+            Trace.Entering();
+            tokenHandle = IntPtr.Zero;
+
+            ArgUtil.NotNullOrEmpty(userName, nameof(userName));
+            if (LogonUser(userName, domain, logonPassword, LOGON32_LOGON_INTERACTIVE, LOGON32_PROVIDER_DEFAULT, out tokenHandle) == 0)
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            userProfile = new PROFILEINFO();
+            userProfile.dwSize = Marshal.SizeOf(typeof(PROFILEINFO));
+            userProfile.lpUserName = userName;
+            if (!LoadUserProfile(tokenHandle, ref userProfile))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            Trace.Info($"Successfully loaded the profile for {domain}\\{userName}.");
+        }
+
+        public void UnloadUserProfile(IntPtr tokenHandle, PROFILEINFO userProfile)
+        {
+            Trace.Entering();
+
+            if (tokenHandle == IntPtr.Zero)
+            {
+                Trace.Verbose("The handle to unload user profile is not set. Returning.");
+            }
+
+            if (!UnloadUserProfile(tokenHandle, userProfile.hProfile))
+            {
+                throw new Win32Exception(Marshal.GetLastWin32Error());
+            }
+
+            Trace.Info($"Successfully unloaded the profile for {userProfile.lpUserName}.");
+        }
+
+        private bool IsValidCredentialInternal(string domain, string userName, string logonPassword, UInt32 logonType)
+        {
+            Trace.Entering();
+            IntPtr tokenHandle = IntPtr.Zero;
+
+            ArgUtil.NotNullOrEmpty(userName, nameof(userName));
+
+            Trace.Info($"Verify credential for account {userName}.");
+            int result = LogonUser(userName, domain, logonPassword, logonType, LOGON32_PROVIDER_DEFAULT, out tokenHandle);
+
+            if (tokenHandle.ToInt32() != 0)
+            {
+                if (!CloseHandle(tokenHandle))
+                {
+                    Trace.Error("Failed during CloseHandle on token from LogonUser");
+                }
+            }
+
+            if (result != 0)
+            {
+                Trace.Info($"Credential for account '{userName}' is valid.");
+                return true;
+            }
+            else
+            {
+                Trace.Info($"Credential for account '{userName}' is invalid.");
+                return false;
             }
         }
 
@@ -766,9 +912,13 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
             public IntPtr Handle { get; set; }
 
             public LsaPolicy()
+                : this(LSA_AccessPolicy.POLICY_ALL_ACCESS)
+            {
+            }
+
+            public LsaPolicy(LSA_AccessPolicy access)
             {
                 LSA_UNICODE_STRING system = new LSA_UNICODE_STRING();
-
                 LSA_OBJECT_ATTRIBUTES attrib = new LSA_OBJECT_ATTRIBUTES()
                 {
                     Length = 0,
@@ -779,13 +929,48 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
                 };
 
                 IntPtr handle = IntPtr.Zero;
-                uint result = LsaOpenPolicy(ref system, ref attrib, LSA_POLICY_ALL_ACCESS, out handle);
-                if (result != 0 || handle == IntPtr.Zero)
+                uint hr = LsaOpenPolicy(ref system, ref attrib, (uint)access, out handle);
+                if (hr != 0 || handle == IntPtr.Zero)
                 {
-                    throw new Exception(StringUtil.Loc("OperationFailed", nameof(LsaOpenPolicy), result));
+                    throw new Exception(StringUtil.Loc("OperationFailed", nameof(LsaOpenPolicy), hr));
                 }
 
                 Handle = handle;
+            }
+
+            public void SetSecretData(string key, string value)
+            {
+                LSA_UNICODE_STRING secretData = new LSA_UNICODE_STRING();
+                LSA_UNICODE_STRING secretName = new LSA_UNICODE_STRING();
+
+                secretName.Buffer = Marshal.StringToHGlobalUni(key);
+
+                var charSize = sizeof(char);
+
+                secretName.Length = (UInt16)(key.Length * charSize);
+                secretName.MaximumLength = (UInt16)((key.Length + 1) * charSize);
+
+                if (value != null && value.Length > 0)
+                {
+                    // Create data and key
+                    secretData.Buffer = Marshal.StringToHGlobalUni(value);
+                    secretData.Length = (UInt16)(value.Length * charSize);
+                    secretData.MaximumLength = (UInt16)((value.Length + 1) * charSize);
+                }
+                else
+                {
+                    // Delete data and key
+                    secretData.Buffer = IntPtr.Zero;
+                    secretData.Length = 0;
+                    secretData.MaximumLength = 0;
+                }
+
+                uint result = LsaStorePrivateData(Handle, ref secretName, ref secretData);
+                uint winErrorCode = LsaNtStatusToWinError(result);
+                if (winErrorCode != 0)
+                {
+                    throw new Exception(StringUtil.Loc("OperationFailed", nameof(LsaNtStatusToWinError), winErrorCode));
+                }
             }
 
             void IDisposable.Dispose()
@@ -794,18 +979,52 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
                 LsaClose(Handle);
                 GC.SuppressFinalize(this);
             }
+
+            internal static string DefaultPassword = "DefaultPassword";
         }
 
+        internal enum LSA_AccessPolicy : long
+        {
+            POLICY_VIEW_LOCAL_INFORMATION = 0x00000001L,
+            POLICY_VIEW_AUDIT_INFORMATION = 0x00000002L,
+            POLICY_GET_PRIVATE_INFORMATION = 0x00000004L,
+            POLICY_TRUST_ADMIN = 0x00000008L,
+            POLICY_CREATE_ACCOUNT = 0x00000010L,
+            POLICY_CREATE_SECRET = 0x00000020L,
+            POLICY_CREATE_PRIVILEGE = 0x00000040L,
+            POLICY_SET_DEFAULT_QUOTA_LIMITS = 0x00000080L,
+            POLICY_SET_AUDIT_REQUIREMENTS = 0x00000100L,
+            POLICY_AUDIT_LOG_ADMIN = 0x00000200L,
+            POLICY_SERVER_ADMIN = 0x00000400L,
+            POLICY_LOOKUP_NAMES = 0x00000800L,
+            POLICY_NOTIFICATION = 0x00001000L,
+            POLICY_ALL_ACCESS = 0x00001FFFL
+        }
+
+        [DllImport("advapi32.dll", SetLastError = true, PreserveSig = true)]
+        public static extern uint LsaStorePrivateData(
+            IntPtr policyHandle,
+            ref LSA_UNICODE_STRING KeyName,
+            ref LSA_UNICODE_STRING PrivateData
+        );
+
+        [DllImport("advapi32.dll", SetLastError = true, PreserveSig = true)]
+        public static extern uint LsaNtStatusToWinError(
+            uint status
+        );
+
+        private static UInt32 LOGON32_LOGON_INTERACTIVE = 2;
+        private const UInt32 LOGON32_LOGON_NETWORK = 3;
+
         // Declaration of external pinvoke functions
-        private static readonly uint LSA_POLICY_ALL_ACCESS = 0x1FFF;
         private static readonly string s_logonAsServiceName = "SeServiceLogonRight";
 
-        private const UInt32 LOGON32_LOGON_NETWORK = 3;
         private const UInt32 LOGON32_PROVIDER_DEFAULT = 0;
 
         private const int SERVICE_WIN32_OWN_PROCESS = 0x00000010;
         private const int SERVICE_NO_CHANGE = -1;
         private const int SERVICE_CONFIG_FAILURE_ACTIONS = 0x2;
+        private const int SERVICE_CONFIG_DELAYED_AUTO_START_INFO = 0x3;
 
         // TODO Fix this. This is not yet available in coreclr (newer version?)
         private const int UnicodeCharSize = 2;
@@ -888,6 +1107,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
             public string lpCommand;
             public int cActions;
             public long lpsaActions;
+        }
+
+        [StructLayout(LayoutKind.Sequential)]
+        public struct SERVICE_DELAYED_AUTO_START_INFO
+        {
+            public bool fDelayedAutostart;
         }
 
         // Class to represent a failure action which consists of a recovery
@@ -989,12 +1214,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
                                                           int level,
                                                           ref LocalGroupMemberInfo buf,
                                                           int totalEntries);
-        [DllImport("Netapi32.dll")]
-        public extern static int NetLocalGroupDelMembers([MarshalAs(UnmanagedType.LPWStr)] string serverName,
-                                                         [MarshalAs(UnmanagedType.LPWStr)] string groupName,
-                                                         int level,
-                                                         ref LocalGroupMemberInfo buf,
-                                                         int totalEntries);
 
         [DllImport("Netapi32.dll")]
         public extern static int NetLocalGroupDel([MarshalAs(UnmanagedType.LPWStr)] string servername, [MarshalAs(UnmanagedType.LPWStr)] string groupname);
@@ -1028,6 +1247,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
 
         [DllImport("advapi32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
         public static extern int LogonUser(string userName, string domain, string password, uint logonType, uint logonProvider, out IntPtr tokenHandle);
+
+        [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern Boolean LoadUserProfile(IntPtr hToken, ref PROFILEINFO lpProfileInfo);
+
+        [DllImport("userenv.dll", SetLastError = true, CharSet = CharSet.Unicode)]
+        public static extern Boolean UnloadUserProfile(IntPtr hToken, IntPtr hProfile);
 
         [DllImport("kernel32", SetLastError = true)]
         public static extern bool CloseHandle(IntPtr handle);
@@ -1069,9 +1294,29 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener.Configuration
         [DllImport("advapi32.dll", EntryPoint = "ChangeServiceConfig2")]
         public static extern bool ChangeServiceFailureActions(IntPtr hService, int dwInfoLevel, ref SERVICE_FAILURE_ACTIONS lpInfo);
 
+        [DllImport("advapi32.dll", EntryPoint = "ChangeServiceConfig2")]
+        public static extern bool ChangeServiceDelayedAutoStart(IntPtr hService, int dwInfoLevel, ref SERVICE_DELAYED_AUTO_START_INFO lpInfo);
+
         [DllImport("kernel32.dll")]
         static extern uint GetLastError();
+    }
 
+    [StructLayout(LayoutKind.Sequential)]
+    public struct PROFILEINFO
+    {
+        public int dwSize;
+        public int dwFlags;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public String lpUserName;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public String lpProfilePath;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public String lpDefaultPath;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public String lpServerName;
+        [MarshalAs(UnmanagedType.LPTStr)]
+        public String lpPolicyPath;
+        public IntPtr hProfile;
     }
 }
 #endif

@@ -9,32 +9,67 @@ using System.Reflection;
 using System.Runtime.Loader;
 using System.Threading;
 using System.Threading.Tasks;
+using System.Diagnostics;
+using System.Net.Http;
+using System.Diagnostics.Tracing;
+using Microsoft.TeamFoundation.DistributedTask.Logging;
+using System.Net.Http.Headers;
 
 namespace Microsoft.VisualStudio.Services.Agent
 {
     public interface IHostContext : IDisposable
     {
+        RunMode RunMode { get; set; }
+        StartupType StartupType { get; set; }
+        CancellationToken AgentShutdownToken { get; }
+        ShutdownReason AgentShutdownReason { get; }
+        ISecretMasker SecretMasker { get; }
+        ProductInfoHeaderValue UserAgent { get; }
         string GetDirectory(WellKnownDirectory directory);
+        string GetConfigFile(WellKnownConfigFile configFile);
         Tracing GetTrace(string name);
         Task Delay(TimeSpan delay, CancellationToken cancellationToken);
         T CreateService<T>() where T : class, IAgentService;
         T GetService<T>() where T : class, IAgentService;
         void SetDefaultCulture(string name);
         event EventHandler Unloading;
+        void ShutdownAgent(ShutdownReason reason);
     }
 
-    public sealed class HostContext : IHostContext, IDisposable
+    public enum StartupType
+    {
+        Manual,
+        Service,
+        AutoStartup
+    }
+
+    public sealed class HostContext : EventListener, IObserver<DiagnosticListener>, IObserver<KeyValuePair<string, object>>, IHostContext, IDisposable
     {
         private const int _defaultLogPageSize = 8;  //MB
         private static int _defaultLogRetentionDays = 30;
+        private static int[] _vssHttpMethodEventIds = new int[] { 1, 2, 3, 4, 5, 6, 7, 8, 9, 24 };
+        private static int[] _vssHttpCredentialEventIds = new int[] { 11, 13, 14, 15, 16, 17, 18, 20, 21, 22, 27, 29 };
         private readonly ConcurrentDictionary<Type, object> _serviceInstances = new ConcurrentDictionary<Type, object>();
         private readonly ConcurrentDictionary<Type, Type> _serviceTypes = new ConcurrentDictionary<Type, Type>();
+        private readonly ISecretMasker _secretMasker = new SecretMasker();
+        private readonly ProductInfoHeaderValue _userAgent = new ProductInfoHeaderValue($"VstsAgentCore-{BuildConstants.AgentPackage.PackageName}", Constants.Agent.Version);
+        private CancellationTokenSource _agentShutdownTokenSource = new CancellationTokenSource();
+
+        private RunMode _runMode = RunMode.Normal;
         private Tracing _trace;
+        private Tracing _vssTrace;
+        private Tracing _httpTrace;
         private ITraceManager _traceManager;
         private AssemblyLoadContext _loadContext;
+        private IDisposable _httpTraceSubscription;
+        private IDisposable _diagListenerSubscription;
+        private StartupType _startupType;
 
         public event EventHandler Unloading;
-
+        public CancellationToken AgentShutdownToken => _agentShutdownTokenSource.Token;
+        public ShutdownReason AgentShutdownReason { get; private set; }
+        public ISecretMasker SecretMasker => _secretMasker;
+        public ProductInfoHeaderValue UserAgent => _userAgent;
         public HostContext(string hostType, string logFile = null)
         {
             // Validate args.
@@ -42,6 +77,9 @@ namespace Microsoft.VisualStudio.Services.Agent
 
             _loadContext = AssemblyLoadContext.GetLoadContext(typeof(HostContext).GetTypeInfo().Assembly);
             _loadContext.Unloading += LoadContext_Unloading;
+
+            this.SecretMasker.AddValueEncoder(ValueEncoders.JsonStringEscape);
+            this.SecretMasker.AddValueEncoder(ValueEncoders.UriDataEscape);
 
             // Create the trace manager.
             if (string.IsNullOrEmpty(logFile))
@@ -60,14 +98,46 @@ namespace Microsoft.VisualStudio.Services.Agent
                     logRetentionDays = _defaultLogRetentionDays;
                 }
 
-                _traceManager = new TraceManager(new HostTraceListener(hostType, logPageSize, logRetentionDays), GetService<ISecretMasker>());
+                // this should give us _diag folder under agent root directory
+                string diagLogDirectory = Path.Combine(new DirectoryInfo(Path.GetDirectoryName(Assembly.GetEntryAssembly().Location)).Parent.FullName, Constants.Path.DiagDirectory);
+                _traceManager = new TraceManager(new HostTraceListener(diagLogDirectory, hostType, logPageSize, logRetentionDays), this.SecretMasker);
             }
             else
             {
-                _traceManager = new TraceManager(new HostTraceListener(logFile), GetService<ISecretMasker>());
+                _traceManager = new TraceManager(new HostTraceListener(logFile), this.SecretMasker);
             }
 
             _trace = GetTrace(nameof(HostContext));
+            _vssTrace = GetTrace(nameof(VisualStudio) + nameof(VisualStudio.Services));  // VisualStudioService
+
+            // Enable Http trace
+            bool enableHttpTrace;
+            if (bool.TryParse(Environment.GetEnvironmentVariable("VSTS_AGENT_HTTPTRACE"), out enableHttpTrace) && enableHttpTrace)
+            {
+                _trace.Warning("*****************************************************************************************");
+                _trace.Warning("**                                                                                     **");
+                _trace.Warning("** Http trace is enabled, all your http traffic will be dumped into agent diag log.    **");
+                _trace.Warning("** DO NOT share the log in public place! The trace may contains secrets in plain text. **");
+                _trace.Warning("**                                                                                     **");
+                _trace.Warning("*****************************************************************************************");
+
+                _httpTrace = GetTrace("HttpTrace");
+                _diagListenerSubscription = DiagnosticListener.AllListeners.Subscribe(this);
+            }
+        }
+
+        public RunMode RunMode
+        {
+            get
+            {
+                return _runMode;
+            }
+
+            set
+            {
+                _trace.Info($"Set run mode: {value}");
+                _runMode = value;
+            }
         }
 
         public string GetDirectory(WellKnownDirectory directory)
@@ -130,9 +200,9 @@ namespace Microsoft.VisualStudio.Services.Agent
                     AgentSettings settings = configurationStore.GetSettings();
                     ArgUtil.NotNull(settings, nameof(settings));
                     ArgUtil.NotNullOrEmpty(settings.WorkFolder, nameof(settings.WorkFolder));
-                    path = Path.Combine(
+                    path = Path.GetFullPath(Path.Combine(
                         GetDirectory(WellKnownDirectory.Root),
-                        settings.WorkFolder);
+                        settings.WorkFolder));
                     break;
 
                 default:
@@ -140,6 +210,90 @@ namespace Microsoft.VisualStudio.Services.Agent
             }
 
             _trace.Info($"Well known directory '{directory}': '{path}'");
+            return path;
+        }
+
+        public string GetConfigFile(WellKnownConfigFile configFile)
+        {
+            string path;
+            switch (configFile)
+            {
+                case WellKnownConfigFile.Agent:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".agent");
+                    break;
+
+                case WellKnownConfigFile.Credentials:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".credentials");
+                    break;
+
+                case WellKnownConfigFile.RSACredentials:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".credentials_rsaparams");
+                    break;
+
+                case WellKnownConfigFile.Service:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".service");
+                    break;
+
+                case WellKnownConfigFile.CredentialStore:
+#if OS_OSX
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".credential_store.keychain");
+#else
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".credential_store");
+#endif
+                    break;
+
+                case WellKnownConfigFile.Certificates:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".certificates");
+                    break;
+
+                case WellKnownConfigFile.Proxy:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".proxy");
+                    break;
+
+                case WellKnownConfigFile.ProxyCredentials:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".proxycredentials");
+                    break;
+
+                case WellKnownConfigFile.ProxyBypass:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".proxybypass");
+                    break;
+
+                case WellKnownConfigFile.Autologon:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".autologon");
+                    break;
+
+                case WellKnownConfigFile.Options:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Root),
+                        ".options");
+                    break;
+                default:
+                    throw new NotSupportedException($"Unexpected well known config file: '{configFile}'");
+            }
+
+            _trace.Info($"Well known config file '{configFile}': '{path}'");
             return path;
         }
 
@@ -219,10 +373,31 @@ namespace Microsoft.VisualStudio.Services.Agent
             CultureInfo.DefaultThreadCurrentUICulture = new CultureInfo(name);
         }
 
-        public void Dispose()
+
+        public void ShutdownAgent(ShutdownReason reason)
+        {
+            ArgUtil.NotNull(reason, nameof(reason));
+            _trace.Info($"Agent will be shutdown for {reason.ToString()}");
+            AgentShutdownReason = reason;
+            _agentShutdownTokenSource.Cancel();
+        }
+
+        public override void Dispose()
         {
             Dispose(true);
             GC.SuppressFinalize(this);
+        }
+
+        public StartupType StartupType
+        {
+            get
+            {
+                return _startupType;
+            }
+            set
+            {
+                _startupType = value;
+            }
         }
 
         private void Dispose(bool disposing)
@@ -235,8 +410,15 @@ namespace Microsoft.VisualStudio.Services.Agent
                     _loadContext.Unloading -= LoadContext_Unloading;
                     _loadContext = null;
                 }
+                _httpTraceSubscription?.Dispose();
+                _diagListenerSubscription?.Dispose();
                 _traceManager?.Dispose();
                 _traceManager = null;
+
+                _agentShutdownTokenSource?.Dispose();
+                _agentShutdownTokenSource = null;
+
+                base.Dispose();
             }
         }
 
@@ -247,5 +429,131 @@ namespace Microsoft.VisualStudio.Services.Agent
                 Unloading(this, null);
             }
         }
+
+        void IObserver<DiagnosticListener>.OnCompleted()
+        {
+            _httpTrace.Info("DiagListeners finished transmitting data.");
+        }
+
+        void IObserver<DiagnosticListener>.OnError(Exception error)
+        {
+            _httpTrace.Error(error);
+        }
+
+        void IObserver<DiagnosticListener>.OnNext(DiagnosticListener listener)
+        {
+            if (listener.Name == "HttpHandlerDiagnosticListener" && _httpTraceSubscription == null)
+            {
+                _httpTraceSubscription = listener.Subscribe(this);
+            }
+        }
+
+        void IObserver<KeyValuePair<string, object>>.OnCompleted()
+        {
+            _httpTrace.Info("HttpHandlerDiagnosticListener finished transmitting data.");
+        }
+
+        void IObserver<KeyValuePair<string, object>>.OnError(Exception error)
+        {
+            _httpTrace.Error(error);
+        }
+
+        void IObserver<KeyValuePair<string, object>>.OnNext(KeyValuePair<string, object> value)
+        {
+            _httpTrace.Info($"Trace {value.Key} event:{Environment.NewLine}{value.Value.ToString()}");
+        }
+
+        protected override void OnEventSourceCreated(EventSource source)
+        {
+            if (source.Name.Equals("Microsoft-VSS-Http"))
+            {
+                EnableEvents(source, EventLevel.Verbose);
+            }
+        }
+
+        protected override void OnEventWritten(EventWrittenEventArgs eventData)
+        {
+            if (eventData == null)
+            {
+                return;
+            }
+
+            string message = eventData.Message;
+            object[] payload = new object[0];
+            if (eventData.Payload != null && eventData.Payload.Count > 0)
+            {
+                payload = eventData.Payload.ToArray();
+            }
+
+            try
+            {
+                if (_vssHttpMethodEventIds.Contains(eventData.EventId))
+                {
+                    payload[0] = Enum.Parse(typeof(VssHttpMethod), ((int)payload[0]).ToString());
+                }
+                else if (_vssHttpCredentialEventIds.Contains(eventData.EventId))
+                {
+                    payload[0] = Enum.Parse(typeof(VisualStudio.Services.Common.VssCredentialsType), ((int)payload[0]).ToString());
+                }
+
+                if (payload.Length > 0)
+                {
+                    message = String.Format(eventData.Message.Replace("%n", Environment.NewLine), payload);
+                }
+
+                switch (eventData.Level)
+                {
+                    case EventLevel.Critical:
+                    case EventLevel.Error:
+                        _vssTrace.Error(message);
+                        break;
+                    case EventLevel.Warning:
+                        _vssTrace.Warning(message);
+                        break;
+                    case EventLevel.Informational:
+                        _vssTrace.Info(message);
+                        break;
+                    default:
+                        _vssTrace.Verbose(message);
+                        break;
+                }
+            }
+            catch (Exception ex)
+            {
+                _vssTrace.Error(ex);
+                _vssTrace.Info(eventData.Message);
+                _vssTrace.Info(string.Join(", ", eventData.Payload?.ToArray() ?? new string[0]));
+            }
+        }
+
+        // Copied from VSTS code base, used for EventData translation.
+        internal enum VssHttpMethod
+        {
+            UNKNOWN,
+            DELETE,
+            HEAD,
+            GET,
+            OPTIONS,
+            PATCH,
+            POST,
+            PUT,
+        }
+    }
+
+    public static class HostContextExtension
+    {
+        public static HttpClientHandler CreateHttpClientHandler(this IHostContext context)
+        {
+            HttpClientHandler clientHandler = new HttpClientHandler();
+            var agentWebProxy = context.GetService<IVstsAgentWebProxy>();
+            clientHandler.Proxy = agentWebProxy.WebProxy;
+            return clientHandler;
+        }
+    }
+
+    public enum ShutdownReason
+    {
+        UserCancelled = 0,
+        OperatingSystemShutdown = 1,
     }
 }

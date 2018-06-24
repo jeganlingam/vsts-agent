@@ -1,5 +1,5 @@
 using Microsoft.VisualStudio.Services.Agent.Listener;
-using Microsoft.VisualStudio.Services.Agent.Listener.Capabilities;
+using Microsoft.VisualStudio.Services.Agent.Capabilities;
 using Microsoft.VisualStudio.Services.Agent.Listener.Configuration;
 using Microsoft.VisualStudio.Services.Agent.Worker;
 using Microsoft.VisualStudio.Services.Agent.Worker.Build;
@@ -14,6 +14,7 @@ using Xunit;
 using Microsoft.VisualStudio.Services.Agent.Worker.CodeCoverage;
 using Microsoft.VisualStudio.Services.Agent.Worker.Release.Artifacts.Definition;
 using Microsoft.VisualStudio.Services.Agent.Worker.Release.ContainerFetchEngine;
+using Microsoft.VisualStudio.Services.Agent.Worker.Maintenance;
 
 namespace Microsoft.VisualStudio.Services.Agent.Tests
 {
@@ -28,9 +29,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
             // Otherwise, the interface needs to whitelisted.
             var whitelist = new[]
             {
-                typeof(ICapabilitiesProvider),
                 typeof(ICredentialProvider),
-                typeof(IConfigurationProvider)
+                typeof(IConfigurationProvider),
             };
             Validate(
                 assembly: typeof(IMessageListener).GetTypeInfo().Assembly,
@@ -51,8 +51,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
                 typeof(IExtension),
                 typeof(IHostContext),
                 typeof(ITraceManager),
-                typeof(ISecret),
-                typeof(IThrottlingReporter)
+                typeof(IThrottlingReporter),
+                typeof(ICapabilitiesProvider),
             };
             Validate(
                 assembly: typeof(IHostContext).GetTypeInfo().Assembly,
@@ -70,7 +70,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
             {
                 typeof(IArtifactDetails),
                 typeof(IArtifactExtension),
-                typeof(ICodeCoverageEnabler),
                 typeof(ICodeCoverageSummaryReader),
                 typeof(IExecutionContext),
                 typeof(IHandler),
@@ -78,13 +77,17 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
                 typeof(IResultReader),
                 typeof(ISourceProvider),
                 typeof(IStep),
+                typeof(IStepHost),
                 typeof(ITfsVCMapping),
                 typeof(ITfsVCPendingChange),
                 typeof(ITfsVCShelveset),
                 typeof(ITfsVCStatus),
                 typeof(ITfsVCWorkspace),
                 typeof(IWorkerCommandExtension),
-                typeof(IContainerProvider)
+                typeof(IContainerProvider),
+                typeof(INUnitResultsXmlReader),
+                typeof(IMaintenanceServiceProvider),
+                typeof(IDiagnosticLogManager)
             };
             Validate(
                 assembly: typeof(IStepsRunner).GetTypeInfo().Assembly,
@@ -97,6 +100,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests
             IDictionary<TypeInfo, Type> w = whitelist.ToDictionary(x => x.GetTypeInfo());
             foreach (TypeInfo interfaceTypeInfo in assembly.DefinedTypes.Where(x => x.IsInterface && !w.ContainsKey(x)))
             {
+                // Temporary hack due to shared code copied in two places.
+                if (interfaceTypeInfo.FullName.StartsWith("Microsoft.TeamFoundation.DistributedTask"))
+                {
+                    continue;
+                }
+
                 // Assert the ServiceLocatorAttribute is defined on the interface.
                 CustomAttributeData attribute =
                     interfaceTypeInfo

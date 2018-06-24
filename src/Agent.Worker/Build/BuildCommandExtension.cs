@@ -16,6 +16,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 
         public string CommandArea => "build";
 
+        public HostTypes SupportedHostTypes => HostTypes.All;
+
         public void ProcessCommand(IExecutionContext context, Command command)
         {
             if (string.Equals(command.Event, WellKnownBuildCommand.UploadLog, StringComparison.OrdinalIgnoreCase))
@@ -42,6 +44,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 
         private void ProcessBuildUploadLogCommand(IExecutionContext context, string data)
         {
+            if (context.Container != null)
+            {
+                // Translate file path back from container path
+                data = context.Container.TranslateToHostPath(data);
+            }
+
             if (!string.IsNullOrEmpty(data) && File.Exists(data))
             {
                 context.QueueAttachFile(CoreAttachmentType.Log, "CustomToolLog", data);
@@ -56,6 +64,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
         // Leave the implementation on agent for back compat
         private void ProcessBuildUploadSummaryCommand(IExecutionContext context, string data)
         {
+            if (context.Container != null)
+            {
+                // Translate file path back from container path
+                data = context.Container.TranslateToHostPath(data);
+            }
+
             if (!string.IsNullOrEmpty(data) && File.Exists(data))
             {
                 var fileName = Path.GetFileName(data);
@@ -81,14 +95,14 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             if (!String.IsNullOrEmpty(data))
             {
                 // update build number within Context.
-                context.Variables.Set(WellKnownBuildVariables.BuildNumber, data);
+                context.Variables.Set(BuildVariables.BuildNumber, data);
 
                 // queue async command task to update build number.
                 context.Debug($"Update build number for build: {buildId.Value} to: {data} at backend.");
                 var commandContext = HostContext.CreateService<IAsyncCommandContext>();
                 commandContext.InitializeCommandContext(context, StringUtil.Loc("UpdateBuildNumber"));
                 commandContext.Task = UpdateBuildNumberAsync(commandContext,
-                                                             WorkerUtilies.GetVssConnection(context),
+                                                             WorkerUtilities.GetVssConnection(context),
                                                              projectId,
                                                              buildId.Value,
                                                              data,
@@ -133,7 +147,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
                 var commandContext = HostContext.CreateService<IAsyncCommandContext>();
                 commandContext.InitializeCommandContext(context, StringUtil.Loc("AddBuildTag"));
                 commandContext.Task = AddBuildTagAsync(commandContext,
-                                                       WorkerUtilies.GetVssConnection(context),
+                                                       WorkerUtilities.GetVssConnection(context),
                                                        projectId,
                                                        buildId.Value,
                                                        data,
@@ -157,7 +171,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             BuildServer buildServer = new BuildServer(connection, projectId);
             var tags = await buildServer.AddBuildTag(buildId, buildTag, cancellationToken);
 
-            if (tags == null || !tags.Contains(buildTag))
+            if (tags == null || !tags.Any(t => t.Equals(buildTag, StringComparison.OrdinalIgnoreCase)))
             {
                 throw new Exception(StringUtil.Loc("BuildTagAddFailed", buildTag));
             }
