@@ -70,7 +70,9 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Maintenance
 
         public override void InitializeJobExtension(IExecutionContext context, IList<JobStep> steps, WorkspaceOptions workspace)
         {
-            return;
+			new JobPrepareValidator().Validate(HostType, Trace, 0);
+
+			return;
         }
     }
 }

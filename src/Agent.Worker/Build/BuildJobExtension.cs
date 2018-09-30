@@ -1,13 +1,17 @@
 using Microsoft.TeamFoundation.Build.WebApi;
 using Pipelines = Microsoft.TeamFoundation.DistributedTask.Pipelines;
 using Microsoft.TeamFoundation.DistributedTask.WebApi;
-using Microsoft.VisualStudio.Services.Agent.Util;
 using System;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Threading.Tasks;
 using Microsoft.TeamFoundation.DistributedTask.Pipelines;
+using Agent.Worker;
+using Microsoft.VisualStudio.Services.Agent.Util;
+using System.Globalization;
+using System.Runtime.InteropServices;
+using System.Threading;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 {
@@ -117,9 +121,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
             Trace.Entering();
             ArgUtil.NotNull(executionContext, nameof(executionContext));
 
-            // This flag can be false for jobs like cleanup artifacts.
-            // If syncSources = false, we will not set source related build variable, not create build folder, not sync source.
-            bool syncSources = executionContext.Variables.Build_SyncSources ?? true;
+			new JobPrepareValidator().Validate(HostType, Trace, 0);
+
+			// This flag can be false for jobs like cleanup artifacts.
+			// If syncSources = false, we will not set source related build variable, not create build folder, not sync source.
+			bool syncSources = executionContext.Variables.Build_SyncSources ?? true;
             if (!syncSources)
             {
                 Trace.Info($"{Constants.Variables.Build.SyncSources} = false, we will not set source related build variable, not create build folder and not sync source");
@@ -175,8 +181,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
                 }
             }
 
-            // Prepare the build directory.
-            executionContext.Output(StringUtil.Loc("PrepareBuildDir"));
+			// Prepare the build directory.
+			executionContext.Output(StringUtil.Loc("PrepareBuildDir"));
             var directoryManager = HostContext.GetService<IBuildDirectoryManager>();
             TrackingConfig trackingConfig = directoryManager.PrepareDirectory(
                 executionContext,
