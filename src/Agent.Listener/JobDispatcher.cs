@@ -326,6 +326,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                     return;
                 }
 
+                HostContext.WritePerfCounter($"JobRequestRenewed_{requestId.ToString()}");
+
                 Task<int> workerProcessTask = null;
                 object _outputLock = new object();
                 List<string> workerOutput = new List<string>();
@@ -376,6 +378,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                             }
 
                             // Start the child process.
+                            HostContext.WritePerfCounter("StartingWorkerProcess");
                             var assemblyDirectory = HostContext.GetDirectory(WellKnownDirectory.Bin);
                             string workerFileName = Path.Combine(assemblyDirectory, _workerProcessName);
                             workerProcessTask = processInvoker.ExecuteAsync(
@@ -395,6 +398,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                     try
                     {
                         Trace.Info($"Send job request message to worker for job {message.JobId}.");
+                        HostContext.WritePerfCounter($"AgentSendingJobToWorker_{message.JobId}");
                         using (var csSendJobRequest = new CancellationTokenSource(_channelTimeout))
                         {
                             await processChannel.SendAsync(
@@ -431,6 +435,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                     // we get first jobrequest renew succeed and start the worker process with the job message.
                     // send notification to machine provisioner.
                     await notification.JobStarted(message.JobId);
+                    HostContext.WritePerfCounter($"SentJobToWorker_{requestId.ToString()}");
 
                     try
                     {
@@ -717,7 +722,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                 Uri jobServerUrl = systemConnection.Url;
 
                 // Make sure SystemConnection Url match Config Url base for OnPremises server
-                if ((!message.Variables.ContainsKey(Constants.Variables.System.ServerType) && !UrlUtil.IsHosted(systemConnection.Url.AbsoluteUri)) ||
+                if (!message.Variables.ContainsKey(Constants.Variables.System.ServerType) ||
                     string.Equals(message.Variables[Constants.Variables.System.ServerType]?.Value, "OnPremises", StringComparison.OrdinalIgnoreCase))
                 {
                     try

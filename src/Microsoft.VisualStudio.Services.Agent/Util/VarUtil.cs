@@ -3,6 +3,8 @@ using System.Collections;
 using System.Collections.Generic;
 using System.IO;
 using System.Linq;
+using Microsoft.VisualStudio.Services.WebApi;
+using Newtonsoft.Json.Linq;
 
 namespace Microsoft.VisualStudio.Services.Agent.Util
 {
@@ -43,6 +45,46 @@ namespace Microsoft.VisualStudio.Services.Agent.Util
             }
         }
 
+        public static string OSArchitecture
+        {
+            get
+            {
+                switch (Constants.Agent.PlatformArchitecture)
+                {
+                    case Constants.Architecture.X86:
+                        return "X86";
+                    case Constants.Architecture.X64:
+                        return "X64";
+                    case Constants.Architecture.Arm:
+                        return "ARM";
+                    default:
+                        throw new NotSupportedException(); // Should never reach here.
+                }
+            }
+        }
+
+        public static JToken ExpandEnvironmentVariables(IHostContext context, JToken target)
+        {
+            var mapFuncs = new Dictionary<JTokenType, Func<JToken, JToken>>
+            {
+                {
+                    JTokenType.String,
+                    (t)=> {
+                        var token = new Dictionary<string, string>()
+                        {
+                            {
+                                "token", t.ToString()
+                            }
+                        };
+                        ExpandEnvironmentVariables(context, token);
+                        return token["token"];
+                    }
+                }
+            };
+
+            return target.Map(mapFuncs);
+        }
+
         public static void ExpandEnvironmentVariables(IHostContext context, IDictionary<string, string> target)
         {
             ArgUtil.NotNull(context, nameof(context));
@@ -61,6 +103,28 @@ namespace Microsoft.VisualStudio.Services.Agent.Util
 
             // Expand the target values.
             ExpandValues(context, source, target);
+        }
+
+        public static JToken ExpandValues(IHostContext context, IDictionary<string, string> source, JToken target)
+        {
+            var mapFuncs = new Dictionary<JTokenType, Func<JToken, JToken>>
+            {
+                {
+                    JTokenType.String,
+                    (t)=> {
+                        var token = new Dictionary<string, string>()
+                        {
+                            {
+                                "token", t.ToString()
+                            }
+                        };
+                        ExpandValues(context, source, token);
+                        return token["token"];
+                    }
+                }
+            };
+
+            return target.Map(mapFuncs);
         }
 
         public static void ExpandValues(IHostContext context, IDictionary<string, string> source, IDictionary<string, string> target)

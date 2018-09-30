@@ -39,6 +39,21 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             + "<system-err><![CDATA[]]></system-err>"
             + "</testsuite>";
 
+        private const string _sampleJunitResultXmlInvalidTime = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>"
+            + "<testsuite errors = \"0\" failures=\"0\" hostname=\"achalla-dev\" name=\"test.AllTests\" skipped=\"0\" tests=\"1\" time=\"NaN\" timestamp=\"2015-09-01T10:19:04\">"
+            + "<properties>"
+            + "<property name = \"java.vendor\" value=\"Oracle Corporation\" />"
+            + "<property name = \"lib.dir\" value=\"lib\" />"
+            + "<property name = \"sun.java.launcher\" value=\"SUN_STANDARD\" />"
+            + "</properties>"
+            + "<testcase classname = \"test.ExampleTest\" name=\"Fact\" time=\"NaN\" />"
+            + "<testcase name =\"can be instantiated\" time=\"-Infinity\" classname=\"PhantomJS 2.0.0 (Windows 8).the Admin module\"/>" 
+            + "<system-out><![CDATA[Set Up Complete."
+            + "Sample test Successful"
+            + "]]></system-out>"
+            + "<system-err><![CDATA[]]></system-err>"
+            + "</testsuite>";
+
         private const string _sampleJunitResultXmlWithOwner = "<?xml version=\"1.0\" encoding=\"UTF-8\" ?>"
             + "<testsuite errors = \"0\" failures=\"0\" hostname=\"achalla-dev\" name=\"test.AllTests\" skipped=\"0\" tests=\"1\" time=\"0.03\" timestamp=\"2015-09-01T10:19:04\">"
             + "<properties>"
@@ -87,6 +102,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
               "<testcase classname=\"com.contoso.billingservice.ConsoleMessageRendererTest\" name=\"testRenderNullMessage\" time=\"1.001\" />" +
             "</testsuite>" +
             "</testsuites>";
+
+        private const string _jUnitWithDefaultDateTime =
+            "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
+            "<testsuite errors=\"0\" failures=\"1\" hostname=\"mghost\" name=\"com.contoso.billingservice.ConsoleMessageRendererTest\" skipped=\"0\" tests=\"2\" time=\"0.000\" timestamp=\"0001-01-01T00:00:00\">" +
+              "<testcase classname=\"com.contoso.billingservice.ConsoleMessageRendererTest\" name=\"testRenderNullMessage\" time=\"1.001\" />" +
+            "</testsuite>";
 
         private const string c_jUnitMultiSuiteParallelXml =
             "<?xml version=\"1.0\" encoding=\"UTF-8\"?>" +
@@ -185,6 +206,19 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
         [Fact]
         [Trait("Level", "L0")]
         [Trait("Category", "PublishTestResults")]
+        public void VerifyCompletedTimeWhenTimeIsInvalid()
+        {
+            SetupMocks();
+            _junitResultsToBeRead = _sampleJunitResultXmlInvalidTime;
+            ReadResults();
+            Assert.Equal(_testRunData.StartDate, _testRunData.CompleteDate);
+            Assert.Equal(_testRunData.Results[0].StartedDate, _testRunData.Results[0].CompletedDate);
+            Assert.Equal(_testRunData.Results[1].StartedDate, _testRunData.Results[1].CompletedDate);
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "PublishTestResults")]
         public void VerifyTestCaseDurationWhenTestCaseTimeIsInMilliseconds()
         {
             SetupMocks();
@@ -193,6 +227,19 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
 
             var time = TimeSpan.FromMilliseconds(_testRunData.Results[0].DurationInMs);
             Assert.Equal(0.001, time.TotalSeconds);
+        }
+
+        [Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "PublishTestResults")]
+        public void VerifyBehaviorWhenDefaultDateTimePassed()
+        {
+            SetupMocks();
+            // case for duration = maxcompletedtime- minstarttime
+            _junitResultsToBeRead = _jUnitWithDefaultDateTime;
+            ReadResults();
+            Assert.Equal(null, _testRunData.StartDate);
+            Assert.Equal(null, _testRunData.CompleteDate);
         }
 
         [Fact]
@@ -326,8 +373,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
 
             Assert.NotNull(_testRunData);
             Assert.Equal(1, _testRunData.Results.Length);
-            Assert.Equal("system out...", _testRunData.Results[0].ConsoleLog);
-            Assert.Equal("system err...", _testRunData.Results[0].StandardError);
+            Assert.Equal("system out...", _testRunData.Results[0].AttachmentData.ConsoleLog);
+            Assert.Equal("system err...", _testRunData.Results[0].AttachmentData.StandardError);
         }
 
         [Fact]

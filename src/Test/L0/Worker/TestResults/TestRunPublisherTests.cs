@@ -144,6 +144,35 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             Assert.Equal("runName", _runContext.RunName);
         }
 
+#if OS_LINUX	
+	[Fact]
+        [Trait("Level", "L0")]
+        [Trait("Category", "PublishTestResults")]
+#endif
+        public void HavingColonInAttachmentFileNameIsReplaced()
+        {
+            SetupMocks();
+            File.WriteAllText("colon:1:2:3.trx", "asdf");
+            ResetValues();
+            
+            _testRunData = _publisher.ReadResultsFromFile(_testRunContext, "filepath");
+            _publisher.StartTestRunAsync(_testRunData).Wait();
+            var result = new TestCaseResultData();
+            var testRun = new TestRun { Id = 1 };
+            result.AttachmentData = new AttachmentData();
+            result.AttachmentData.AttachmentsFilePathList = new string[] { "colon:1:2:3.trx" };
+            _publisher.AddResultsAsync(testRun, new TestCaseResultData[] { result }).Wait();
+
+            Assert.Equal("colon_1_2_3.trx", _resultsLevelAttachments[1][0].FileName);
+
+            try
+            {
+                File.Delete("colon:1:2:3.trx");
+            }
+            catch
+            { }
+        }	
+
         [Fact]
         [Trait("Level", "L0")]
         [Trait("Category", "PublishTestResults")]
@@ -155,7 +184,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             _publisher.StartTestRunAsync(_testRunData);
             var result = new TestCaseResultData();
             var testRun = new TestRun { Id = 1 };
-            result.Attachments = new string[] { "attachment.txt" };
+            result.AttachmentData = new AttachmentData();
+            result.AttachmentData.AttachmentsFilePathList = new string[] { "attachment.txt" };
             _publisher.AddResultsAsync(testRun, new TestCaseResultData[] { result }).Wait();
 
             Assert.Equal(_resultsLevelAttachments.Count, 1);
@@ -178,7 +208,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             _publisher.StartTestRunAsync(_testRunData).Wait();
             var result = new TestCaseResultData();
             var testRun = new TestRun { Id = 1 };
-            result.Attachments = new string[] { "sampleTrx.trx" };
+            result.AttachmentData = new AttachmentData();
+            result.AttachmentData.AttachmentsFilePathList = new string[] { "sampleTrx.trx" };
             _publisher.AddResultsAsync(testRun, new TestCaseResultData[] { result }).Wait();
             Assert.Equal(_resultsLevelAttachments.Count, 1);
             Assert.Equal(_resultsLevelAttachments[1].Count, 1);
@@ -204,7 +235,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             _publisher.StartTestRunAsync(_testRunData).Wait();
             var result = new TestCaseResultData();
             var testRun = new TestRun { Id = 1 };
-            result.Attachments = new string[] { "testimpact.xml" };
+            result.AttachmentData = new AttachmentData();
+            result.AttachmentData.AttachmentsFilePathList = new string[] { "testimpact.xml" };
             _publisher.AddResultsAsync(testRun, new TestCaseResultData[] { result }).Wait();
             Assert.Equal(_resultsLevelAttachments.Count, 1);
             Assert.Equal(_resultsLevelAttachments[1].Count, 1);
@@ -229,7 +261,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             _testRunData = _publisher.ReadResultsFromFile(_testRunContext, "filepath");
             _publisher.StartTestRunAsync(_testRunData).Wait();
             TestCaseResultData result = new TestCaseResultData();
-            result.Attachments = new string[] { "SystemInformation.xml" };
+            result.AttachmentData = new AttachmentData();
+            result.AttachmentData.AttachmentsFilePathList = new string[] { "SystemInformation.xml" };
             var testRun = new TestRun { Id = 1 };
             _publisher.AddResultsAsync(testRun, new TestCaseResultData[] { result }).Wait();
             Assert.Equal(_resultsLevelAttachments.Count, 1);
@@ -309,7 +342,10 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             ResetValues();
             _publisher.StartTestRunAsync(new TestRunData()).Wait();
             List<TestCaseResultData> testCaseResultData = new List<TestCaseResultData>();
-            for (int i = 0; i < batchSize + 1; i++) { testCaseResultData.Add(new TestCaseResultData()); }
+            for (int i = 0; i < batchSize + 1; i++) { 
+                testCaseResultData.Add(new TestCaseResultData());
+                testCaseResultData[i].AttachmentData = new AttachmentData();
+            }
             var testRun = new TestRun { Id = 1 };
             _publisher.AddResultsAsync(testRun, testCaseResultData.ToArray()).Wait();
             Assert.Equal(2, _batchSizes.Count);
@@ -326,12 +362,15 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             ResetValues();
 
             TestCaseResultData testResultWithLog = new TestCaseResultData();
-            testResultWithLog.ConsoleLog = "Publish console log is successfully logged";
+            testResultWithLog.AttachmentData = new AttachmentData();
+            testResultWithLog.AttachmentData.ConsoleLog = "Publish console log is successfully logged";
 
             TestCaseResultData testResultWithNoLog = new TestCaseResultData();
-            testResultWithNoLog.ConsoleLog = "";
+            testResultWithNoLog.AttachmentData = new AttachmentData();
+            testResultWithNoLog.AttachmentData.ConsoleLog = "";
 
             TestCaseResultData testResultDefault = new TestCaseResultData();
+            testResultDefault.AttachmentData = new AttachmentData();
 
             List<TestCaseResultData> testResults = new List<TestCaseResultData>() { testResultWithLog, testResultWithNoLog, testResultDefault };
 
@@ -349,7 +388,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             string encodedData = _resultsLevelAttachments[1][0].Stream;
             byte[] bytes = Convert.FromBase64String(encodedData);
             string decodedData = System.Text.Encoding.UTF8.GetString(bytes);
-            Assert.Equal(decodedData, testResultWithLog.ConsoleLog);
+            Assert.Equal(decodedData, testResultWithLog.AttachmentData.ConsoleLog);
         }
 
         [Fact]
@@ -361,12 +400,15 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             ResetValues();
 
             TestCaseResultData testResultWithStandardError = new TestCaseResultData();
-            testResultWithStandardError.StandardError = "Publish standard error is successfully logged";
+            testResultWithStandardError.AttachmentData = new AttachmentData();
+            testResultWithStandardError.AttachmentData.StandardError = "Publish standard error is successfully logged";
 
             TestCaseResultData testResultWithNoStandardError = new TestCaseResultData();
-            testResultWithNoStandardError.StandardError = "";
+            testResultWithNoStandardError.AttachmentData = new AttachmentData();
+            testResultWithNoStandardError.AttachmentData.StandardError = "";
 
             TestCaseResultData testResultDefault = new TestCaseResultData();
+            testResultDefault.AttachmentData = new AttachmentData();
 
             List<TestCaseResultData> testResults = new List<TestCaseResultData>() { testResultWithStandardError, testResultWithNoStandardError, testResultDefault };
 
@@ -384,7 +426,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             string encodedData = _resultsLevelAttachments[1][0].Stream;
             byte[] bytes = Convert.FromBase64String(encodedData);
             string decodedData = System.Text.Encoding.UTF8.GetString(bytes);
-            Assert.Equal(decodedData, testResultWithStandardError.StandardError);
+            Assert.Equal(decodedData, testResultWithStandardError.AttachmentData.StandardError);
         }
 
         [Fact]
@@ -396,15 +438,19 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             ResetValues();
 
             TestCaseResultData testResultWithStandardError1 = new TestCaseResultData();
-            testResultWithStandardError1.StandardError = "Publish standard error is successfully logged for result 1";
+            testResultWithStandardError1.AttachmentData = new AttachmentData();
+            testResultWithStandardError1.AttachmentData.StandardError = "Publish standard error is successfully logged for result 1";
 
             TestCaseResultData testResultWithStandardError2 = new TestCaseResultData();
-            testResultWithStandardError2.StandardError = "Publish standard error is successfully logged for result 2";
+            testResultWithStandardError2.AttachmentData = new AttachmentData();
+            testResultWithStandardError2.AttachmentData.StandardError = "Publish standard error is successfully logged for result 2";
 
             TestCaseResultData testResultWithNoStandardError = new TestCaseResultData();
-            testResultWithNoStandardError.StandardError = "";
+            testResultWithNoStandardError.AttachmentData = new AttachmentData();
+            testResultWithNoStandardError.AttachmentData.StandardError = "";
 
             TestCaseResultData testResultDefault = new TestCaseResultData();
+            testResultDefault.AttachmentData = new AttachmentData();
 
             List<TestCaseResultData> testResults = new List<TestCaseResultData>() { testResultWithStandardError1, testResultWithStandardError2, testResultWithNoStandardError, testResultDefault };
 
@@ -425,12 +471,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Tests.Worker.TestResults
             string encodedData1 = _resultsLevelAttachments[1][0].Stream;
             byte[] bytes1 = Convert.FromBase64String(encodedData1);
             string decodedData1 = System.Text.Encoding.UTF8.GetString(bytes1);
-            Assert.Equal(decodedData1, testResultWithStandardError1.StandardError);
+            Assert.Equal(decodedData1, testResultWithStandardError1.AttachmentData.StandardError);
 
             string encodedData2 = _resultsLevelAttachments[2][0].Stream;
             byte[] bytes2 = Convert.FromBase64String(encodedData2);
             string decodedData2 = System.Text.Encoding.UTF8.GetString(bytes2);
-            Assert.Equal(decodedData2, testResultWithStandardError2.StandardError);
+            Assert.Equal(decodedData2, testResultWithStandardError2.AttachmentData.StandardError);
         }
 
         public void Dispose()

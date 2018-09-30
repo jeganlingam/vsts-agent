@@ -6,6 +6,9 @@ using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.VisualStudio.Services.WebApi;
 using Pipelines = Microsoft.TeamFoundation.DistributedTask.Pipelines;
+using System.IO;
+using System.Reflection;
+using System.Runtime.CompilerServices;
 
 namespace Microsoft.VisualStudio.Services.Agent.Listener
 {
@@ -104,11 +107,47 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
 
                 _inConfigStage = false;
 
-                // Local run
-                if (command.LocalRun)
+                // warmup agent process (JIT/CLR)
+                // In scenarios where the agent is single use (used and then thrown away), the system provisioning the agent can call `agent.listener --warmup` before the machine is made available to the pool for use.
+                // this will optimizes the agent process startup time.
+                if (command.Warmup)
                 {
-                    var localManager = HostContext.GetService<ILocalRunner>();
-                    return await localManager.LocalRunAsync(command, HostContext.AgentShutdownToken);
+                    var binDir = HostContext.GetDirectory(WellKnownDirectory.Bin);
+                    foreach (var assemblyFile in Directory.EnumerateFiles(binDir, "*.dll"))
+                    {
+                        try
+                        {
+                            Trace.Info($"Load assembly: {assemblyFile}.");
+                            var assembly = Assembly.LoadFrom(assemblyFile);
+                            var types = assembly.GetTypes();
+                            foreach (Type loadedType in types)
+                            {
+                                try
+                                {
+                                    Trace.Info($"Load methods: {loadedType.FullName}.");
+                                    var methods = loadedType.GetMethods(BindingFlags.DeclaredOnly | BindingFlags.NonPublic | BindingFlags.Public | BindingFlags.Instance | BindingFlags.Static);
+                                    foreach (var method in methods)
+                                    {
+                                        if (!method.IsAbstract && !method.ContainsGenericParameters)
+                                        {
+                                            Trace.Verbose($"Prepare method: {method.Name}.");
+                                            RuntimeHelpers.PrepareMethod(method.MethodHandle);
+                                        }
+                                    }
+                                }
+                                catch (Exception ex)
+                                {
+                                    Trace.Error(ex);
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Trace.Error(ex);
+                        }
+                    }
+
+                    return Constants.Agent.ReturnCode.Success;
                 }
 
                 AgentSettings settings = configManager.LoadSettings();
@@ -233,6 +272,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                 return Constants.Agent.ReturnCode.TerminatedError;
             }
 
+            HostContext.WritePerfCounter("SessionCreated");
             _term.WriteLine(StringUtil.Loc("ListenForJobs", DateTime.UtcNow));
 
             IJobDispatcher jobDispatcher = null;
@@ -294,6 +334,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
                         }
 
                         message = await getNextMessage; //get next message
+                        HostContext.WritePerfCounter($"MessageReceived_{message.MessageType}");
                         if (string.Equals(message.MessageType, AgentRefreshMessage.MessageType, StringComparison.OrdinalIgnoreCase))
                         {
                             if (disableAutoUpdate)
@@ -405,10 +446,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Listener
             if (command.Configure)
             {
                 _term.WriteLine(StringUtil.Loc("CommandLineHelp_Configure", separator, ext, commonHelp, envHelp));
-            }
-            else if (command.LocalRun)
-            {
-                _term.WriteLine(StringUtil.Loc("CommandLineHelp_LocalRun", separator, ext, commonHelp, envHelp));
             }
             else if (command.Remove)
             {

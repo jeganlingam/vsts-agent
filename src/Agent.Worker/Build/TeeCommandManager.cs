@@ -16,7 +16,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
 
         protected override string Switch => "-";
 
-        public string FilePath => Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Externals), Constants.Path.TeeDirectory, "tf");
+        public override string FilePath => Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Externals), Constants.Path.TeeDirectory, "tf");
 
         // TODO: Remove AddAsync after last-saved-checkin-metadata problem is fixed properly.
         public async Task AddAsync(string localPath)
@@ -76,7 +76,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
         {
             ExecutionContext.Debug("Convert client certificate from 'pkcs' format to 'jks' format.");
             string toolPath = WhichUtil.Which("keytool", true, Trace);
-            string jksFile = Path.Combine(ExecutionContext.Variables.Agent_TempDirectory, $"{Guid.NewGuid()}.jks");
+            string jksFile = Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Temp), $"{Guid.NewGuid()}.jks");
             string argLine;
             if (!string.IsNullOrEmpty(clientCertPassword))
             {
@@ -105,7 +105,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.Build
                 }
             };
 
-            processInvoker.ExecuteAsync(ExecutionContext.Variables.System_DefaultWorkingDirectory, toolPath, argLine, null, true, CancellationToken.None).GetAwaiter().GetResult();
+            processInvoker.ExecuteAsync(ExecutionContext.Variables.Get(Constants.Variables.System.DefaultWorkingDirectory), toolPath, argLine, null, true, CancellationToken.None).GetAwaiter().GetResult();
 
             if (!string.IsNullOrEmpty(clientCertPassword))
             {

@@ -10,6 +10,7 @@ using Microsoft.VisualStudio.Services.Agent.Worker.Container;
 using System.Threading;
 using System.Linq;
 using Microsoft.Win32;
+using Microsoft.VisualStudio.Services.Common;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker
 {
@@ -66,7 +67,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
 #if OS_WINDOWS
             // Check OS version (Windows server 1803 is required)
             object windowsInstallationType = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "InstallationType", defaultValue: null);
-            ArgUtil.NotNull(windowsInstallationType, nameof(windowsInstallationType));            
+            ArgUtil.NotNull(windowsInstallationType, nameof(windowsInstallationType));
             object windowsReleaseId = Registry.GetValue(@"HKEY_LOCAL_MACHINE\SOFTWARE\Microsoft\Windows NT\CurrentVersion", "ReleaseId", defaultValue: null);
             ArgUtil.NotNull(windowsReleaseId, nameof(windowsReleaseId));
             executionContext.Debug($"Current Windows version: '{windowsReleaseId} ({windowsInstallationType})'");
@@ -134,15 +135,38 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                 {
                     string imageName = container.ContainerImage;
                     if (!string.IsNullOrEmpty(registryServer) &&
-                        registryServer.IndexOf("index.docker.io", StringComparison.OrdinalIgnoreCase) < 0 &&
-                        !imageName.StartsWith(registryServer, StringComparison.OrdinalIgnoreCase))
+                        registryServer.IndexOf("index.docker.io", StringComparison.OrdinalIgnoreCase) < 0)
                     {
-                        imageName = $"{registryServer}/{imageName}";
+                        var registryServerUri = new Uri(registryServer);
+                        if (!imageName.StartsWith(registryServerUri.Authority, StringComparison.OrdinalIgnoreCase))
+                        {
+                            imageName = $"{registryServerUri.Authority}/{imageName}";
+                        }
                     }
 
-                    // Pull down docker image
-                    int pullExitCode = await _dockerManger.DockerPull(executionContext, imageName);
-                    if (pullExitCode != 0)
+                    // Pull down docker image with retry up to 3 times
+                    int retryCount = 0;
+                    int pullExitCode = 0;
+                    while (retryCount < 3)
+                    {
+                        pullExitCode = await _dockerManger.DockerPull(executionContext, imageName);
+                        if (pullExitCode == 0)
+                        {
+                            break;
+                        }
+                        else
+                        {
+                            retryCount++;
+                            if (retryCount < 3)
+                            {
+                                var backOff = BackoffTimerHelper.GetRandomBackoff(TimeSpan.FromSeconds(1), TimeSpan.FromSeconds(10));
+                                executionContext.Warning($"Docker pull failed with exit code {pullExitCode}, back off {backOff.TotalSeconds} seconds before retry.");
+                                await Task.Delay(backOff);
+                            }
+                        }
+                    }
+
+                    if (retryCount == 3 && pullExitCode != 0)
                     {
                         throw new InvalidOperationException($"Docker pull failed with exit code {pullExitCode}");
                     }
@@ -150,21 +174,16 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
 
                 // Mount folder into container
 #if OS_WINDOWS
-                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Externals), "C:\\_a\\externals"));
-                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Work), "C:\\_work"));
-                container.MountVolumes.Add(new MountVolume(executionContext.Variables.Agent_ToolsDirectory, "C:\\_work\\_tool"));
-
-                container.PathMappings[HostContext.GetDirectory(WellKnownDirectory.Externals)] = "C:\\_a\\externals";
-                container.PathMappings[HostContext.GetDirectory(WellKnownDirectory.Work)] = "C:\\_work";
-                container.PathMappings[executionContext.Variables.Agent_ToolsDirectory] = "C:\\_work\\_tool";
+                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Externals), container.TranslateToContainerPath(HostContext.GetDirectory(WellKnownDirectory.Externals))));
+                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Work), container.TranslateToContainerPath(HostContext.GetDirectory(WellKnownDirectory.Work))));
+                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Tools), container.TranslateToContainerPath(HostContext.GetDirectory(WellKnownDirectory.Tools))));
 #else
-                string workingDirMountSource = Path.GetDirectoryName(executionContext.Variables.System_DefaultWorkingDirectory.TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
-                string workingDirMountTarget = workingDirMountSource.Replace(HostContext.GetDirectory(WellKnownDirectory.Work), "/_work");
-                container.MountVolumes.Add(new MountVolume(workingDirMountSource, workingDirMountTarget));
-                container.MountVolumes.Add(new MountVolume(executionContext.Variables.Agent_TempDirectory, "/_work/_temp"));
-                container.MountVolumes.Add(new MountVolume(executionContext.Variables.Agent_ToolsDirectory, "/_work/_tool"));
-                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Tasks), "/_work/_tasks"));
-                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Externals), "/_a/externals", true));
+                string workingDirectory = Path.GetDirectoryName(executionContext.Variables.Get(Constants.Variables.System.DefaultWorkingDirectory).TrimEnd(Path.DirectorySeparatorChar, Path.AltDirectorySeparatorChar));
+                container.MountVolumes.Add(new MountVolume(container.TranslateToHostPath(workingDirectory), workingDirectory));
+                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Temp), container.TranslateToContainerPath(HostContext.GetDirectory(WellKnownDirectory.Temp))));
+                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Tools), container.TranslateToContainerPath(HostContext.GetDirectory(WellKnownDirectory.Tools))));
+                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Tasks), container.TranslateToContainerPath(HostContext.GetDirectory(WellKnownDirectory.Tasks))));
+                container.MountVolumes.Add(new MountVolume(HostContext.GetDirectory(WellKnownDirectory.Externals), container.TranslateToContainerPath(HostContext.GetDirectory(WellKnownDirectory.Externals)), true));
 
                 // Ensure .taskkey file exist so we can mount it.
                 string taskKeyFile = Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Work), ".taskkey");
@@ -172,11 +191,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                 {
                     File.WriteAllText(taskKeyFile, string.Empty);
                 }
-                container.MountVolumes.Add(new MountVolume(taskKeyFile, "/_work/.taskkey"));
-
-                container.PathMappings[HostContext.GetDirectory(WellKnownDirectory.Externals)] = "/_a/externals";
-                container.PathMappings[HostContext.GetDirectory(WellKnownDirectory.Work)] = "/_work";
-                container.PathMappings[executionContext.Variables.Agent_ToolsDirectory] = "/_work/_tool";
+                container.MountVolumes.Add(new MountVolume(taskKeyFile, container.TranslateToContainerPath(taskKeyFile)));
 #endif
 
 #if !OS_WINDOWS
@@ -229,6 +244,30 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             int execWhichBashExitCode = await _dockerManger.DockerExec(executionContext, container.ContainerId, string.Empty, $"which bash");
             if (execWhichBashExitCode != 0)
             {
+                try
+                {
+                    // Make sure container is up and running
+                    var psOutputs = await _dockerManger.DockerPS(executionContext, container.ContainerId, "--filter status=running");
+                    if (psOutputs.FirstOrDefault(x => !string.IsNullOrEmpty(x))?.StartsWith(container.ContainerId) != true)
+                    {
+                        // container is not up and running, pull docker log for this container.
+                        await _dockerManger.DockerPS(executionContext, container.ContainerId, string.Empty);
+                        int logsExitCode = await _dockerManger.DockerLogs(executionContext, container.ContainerId);
+                        if (logsExitCode != 0)
+                        {
+                            executionContext.Warning($"Docker logs fail with exit code {logsExitCode}");
+                        }
+
+                        executionContext.Warning($"Docker container {container.ContainerId} is not in running state.");
+                    }
+                }
+                catch (Exception ex)
+                {
+                    // pull container log is best effort.
+                    Trace.Error("Catch exception when check container log and container status.");
+                    Trace.Error(ex);
+                }
+
                 throw new InvalidOperationException($"Docker exec fail with exit code {execWhichBashExitCode}");
             }
 
@@ -323,6 +362,12 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                     executionContext.Error($"Docker stop fail with exit code {stopExitCode}");
                 }
 
+                int rmExitCode = await _dockerManger.DockerRemove(executionContext, container.ContainerId);
+                if (rmExitCode != 0)
+                {
+                    executionContext.Error($"Docker rm fail with exit code {rmExitCode}");
+                }
+
                 if (!string.IsNullOrEmpty(container.ContainerNetwork))
                 {
                     int removeExitCode = await _dockerManger.DockerNetworkRemove(executionContext, container.ContainerNetwork);
@@ -365,7 +410,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             };
 
             await processInvoker.ExecuteAsync(
-                            workingDirectory: context.Variables.Agent_WorkFolder,
+                            workingDirectory: HostContext.GetDirectory(WellKnownDirectory.Work),
                             fileName: command,
                             arguments: arg,
                             environment: null,

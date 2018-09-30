@@ -50,6 +50,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
 
             foreach (var task in uniqueTasks.Select(x => x.Reference))
             {
+                if (task.Id == Pipelines.PipelineConstants.CheckoutTask.Id && task.Version == Pipelines.PipelineConstants.CheckoutTask.Version)
+                {
+                    Trace.Info("Skip download checkout task.");
+                    continue;
+                }
                 await DownloadAsync(executionContext, task);
             }
         }
@@ -59,6 +64,26 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             // Validate args.
             Trace.Entering();
             ArgUtil.NotNull(task, nameof(task));
+
+            if (task.Reference.Id == Pipelines.PipelineConstants.CheckoutTask.Id && task.Reference.Version == Pipelines.PipelineConstants.CheckoutTask.Version)
+            {
+                var checkoutTask = new Definition()
+                {
+                    Directory = HostContext.GetDirectory(WellKnownDirectory.Tasks),
+                    Data = new DefinitionData()
+                    {
+                        Author = Pipelines.PipelineConstants.CheckoutTask.Author,
+                        Description = Pipelines.PipelineConstants.CheckoutTask.Description,
+                        FriendlyName = Pipelines.PipelineConstants.CheckoutTask.FriendlyName,
+                        HelpMarkDown = Pipelines.PipelineConstants.CheckoutTask.HelpMarkDown,
+                        Inputs = Pipelines.PipelineConstants.CheckoutTask.Inputs.ToArray(),
+                        Execution = StringUtil.ConvertFromJson<ExecutionData>(StringUtil.ConvertToJson(Pipelines.PipelineConstants.CheckoutTask.Execution)),
+                        PostJobExecution = StringUtil.ConvertFromJson<ExecutionData>(StringUtil.ConvertToJson(Pipelines.PipelineConstants.CheckoutTask.PostJobExecution))
+                    }
+                };
+
+                return checkoutTask;
+            }
 
             // Initialize the definition wrapper object.
             var definition = new Definition() { Directory = GetDirectory(task.Reference) };
@@ -203,7 +228,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         [JsonIgnore]
         public List<HandlerData> All => _all;
 
-#if !OS_WINDOWS
+#if !OS_WINDOWS || X86
         [JsonIgnore]
 #endif
         public AzurePowerShellHandlerData AzurePowerShell
@@ -234,7 +259,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             }
         }
 
-#if !OS_WINDOWS
+#if !OS_WINDOWS || X86
         [JsonIgnore]
 #endif
         public PowerShellHandlerData PowerShell

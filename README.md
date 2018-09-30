@@ -1,8 +1,8 @@
-# Visual Studio Team Services Agent
+# Azure Pipelines Agent
 
 ## Overview
 
-The cross platform build and release agent for Team Services and Team Foundation Server 2015 and beyond.  This replaced the deprecated closed source windows build agent and the existing [xplat agent](https://github.com/Microsoft/vso-agent)
+The cross platform build and release agent for Azure Pipelines and Team Foundation Server 2015 and beyond.  This replaced the deprecated closed source windows build agent and the existing [xplat agent](https://github.com/Microsoft/vso-agent)
 
 Supported on Windows, OSX, Ubuntu and Red Hat.  Written for the .NET Core CLR as one code base in C#.
 
@@ -11,18 +11,18 @@ Supported on Windows, OSX, Ubuntu and Red Hat.  Written for the .NET Core CLR as
 
 |   | Build & Test |
 |---|:-----:|
-|![Win](docs/res/win_med.png) **Windows**|[![Build & Test][win-build-badge]][win-build]| 
-|![macOS](docs/res/apple_med.png) **macOS**|[![Build & Test][macOS-build-badge]][macOS-build]| 
-|![Linux](docs/res/linux_med.png) **Linux**|[![Build & Test][linux-build-badge]][linux-build]|
+|![Win-x64](docs/res/win_med.png) **Windows x64**|[![Build & Test][win-x64-build-badge]][build]| 
+|![Win-x86](docs/res/win_med.png) **Windows x86**|[![Build & Test][win-x86-build-badge]][build]| 
+|![macOS](docs/res/apple_med.png) **macOS**|[![Build & Test][macOS-build-badge]][build]| 
+|![Linux-x64](docs/res/linux_med.png) **Linux x64**|[![Build & Test][linux-x64-build-badge]][build]|
+|![Linux-arm](docs/res/linux_med.png) **Linux ARM**|[![Build & Test][linux-arm-build-badge]][build]|
 
-[win-build-badge]: https://mseng.visualstudio.com/pipelinetools/_apis/build/status/VSTS.Agent.CI-Windows?branchName=master
-[win-build]: https://mseng.visualstudio.com/PipelineTools/_build?_a=completed&definitionId=6916
-
-[macOS-build-badge]: https://mseng.visualstudio.com/pipelinetools/_apis/build/status/VSTS.Agent.CI-MacOS?branchName=master
-[macOS-build]: https://mseng.visualstudio.com/PipelineTools/_build?_a=completed&definitionId=6917
-
-[linux-build-badge]: https://mseng.visualstudio.com/pipelinetools/_apis/build/status/VSTS.Agent.CI-Linux?branchName=master
-[linux-build]: https://mseng.visualstudio.com/PipelineTools/_build?_a=completed&definitionId=6915
+[win-x64-build-badge]: https://mseng.visualstudio.com/pipelinetools/_apis/build/status/VSTS.Agent/azure-pipelines-agent.ci?branchName=master&jobname=Windows%20Agent%20(x64)
+[win-x86-build-badge]: https://mseng.visualstudio.com/pipelinetools/_apis/build/status/VSTS.Agent/azure-pipelines-agent.ci?branchName=master&jobname=Windows%20Agent%20(x86)
+[macOS-build-badge]: https://mseng.visualstudio.com/pipelinetools/_apis/build/status/VSTS.Agent/azure-pipelines-agent.ci?branchName=master&jobname=macOS%20Agent%20(x64)
+[linux-x64-build-badge]: https://mseng.visualstudio.com/pipelinetools/_apis/build/status/VSTS.Agent/azure-pipelines-agent.ci?branchName=master&jobname=Linux%20Agent%20(x64)
+[linux-arm-build-badge]: https://mseng.visualstudio.com/pipelinetools/_apis/build/status/VSTS.Agent/azure-pipelines-agent.ci?branchName=master&jobname=Linux%20Agent%20(ARM)
+[build]: https://mseng.visualstudio.com/PipelineTools/_build?_a=completed&definitionId=7502
 
 ## System Pre-Requisites
 
@@ -50,7 +50,7 @@ This agent can be used for the VSTS service and it replaces the node agent for T
 
 | Scenario | OSX/Unix | Windows | Comment |
 |:-------------:|:-----:|:-----:|:-----:|
-| VSTS      |  Yes  | Yes   |
+| Azure Pipelines      |  Yes  | Yes   |
 | TFS2015 (onprem)   |  Yes  | No    | Windows use agent with 2015 |
 | TFS2017 (onprem)   |  Yes  | Yes    |  |
 | TFS2018 (onprem)   |  Yes  | Yes    |  |

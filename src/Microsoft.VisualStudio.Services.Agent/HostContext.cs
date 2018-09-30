@@ -34,6 +34,7 @@ namespace Microsoft.VisualStudio.Services.Agent
         void SetDefaultCulture(string name);
         event EventHandler Unloading;
         void ShutdownAgent(ShutdownReason reason);
+        void WritePerfCounter(string counter);
     }
 
     public enum StartupType
@@ -54,6 +55,7 @@ namespace Microsoft.VisualStudio.Services.Agent
         private readonly ISecretMasker _secretMasker = new SecretMasker();
         private readonly ProductInfoHeaderValue _userAgent = new ProductInfoHeaderValue($"VstsAgentCore-{BuildConstants.AgentPackage.PackageName}", Constants.Agent.Version);
         private CancellationTokenSource _agentShutdownTokenSource = new CancellationTokenSource();
+        private object _perfLock = new object();
 
         private RunMode _runMode = RunMode.Normal;
         private Tracing _trace;
@@ -64,6 +66,7 @@ namespace Microsoft.VisualStudio.Services.Agent
         private IDisposable _httpTraceSubscription;
         private IDisposable _diagListenerSubscription;
         private StartupType _startupType;
+        private string _perfFile;
 
         public event EventHandler Unloading;
         public CancellationToken AgentShutdownToken => _agentShutdownTokenSource.Token;
@@ -124,6 +127,21 @@ namespace Microsoft.VisualStudio.Services.Agent
                 _httpTrace = GetTrace("HttpTrace");
                 _diagListenerSubscription = DiagnosticListener.AllListeners.Subscribe(this);
             }
+
+            // Enable perf counter trace
+            string perfCounterLocation = Environment.GetEnvironmentVariable("VSTS_AGENT_PERFLOG");
+            if (!string.IsNullOrEmpty(perfCounterLocation))
+            {
+                try
+                {
+                    Directory.CreateDirectory(perfCounterLocation);
+                    _perfFile = Path.Combine(perfCounterLocation, $"{hostType}.perf");
+                }
+                catch (Exception ex)
+                {
+                    _trace.Error(ex);
+                }
+            }
         }
 
         public RunMode RunMode
@@ -183,10 +201,26 @@ namespace Microsoft.VisualStudio.Services.Agent
                         Constants.Path.TeeDirectory);
                     break;
 
+                case WellKnownDirectory.Temp:
+                    path = Path.Combine(
+                        GetDirectory(WellKnownDirectory.Work),
+                        Constants.Path.TempDirectory);
+                    break;
+
                 case WellKnownDirectory.Tasks:
                     path = Path.Combine(
                         GetDirectory(WellKnownDirectory.Work),
                         Constants.Path.TasksDirectory);
+                    break;
+
+                case WellKnownDirectory.Tools:
+                    path = Environment.GetEnvironmentVariable("AGENT_TOOLSDIRECTORY") ?? Environment.GetEnvironmentVariable(Constants.Variables.Agent.ToolsDirectory);
+                    if (string.IsNullOrEmpty(path))
+                    {
+                        path = Path.Combine(
+                            GetDirectory(WellKnownDirectory.Work),
+                            Constants.Path.ToolDirectory);
+                    }
                     break;
 
                 case WellKnownDirectory.Update:
@@ -397,6 +431,25 @@ namespace Microsoft.VisualStudio.Services.Agent
             set
             {
                 _startupType = value;
+            }
+        }
+
+        public void WritePerfCounter(string counter)
+        {
+            if (!string.IsNullOrEmpty(_perfFile))
+            {
+                string normalizedCounter = counter.Replace(':', '_');
+                lock (_perfLock)
+                {
+                    try
+                    {
+                        File.AppendAllLines(_perfFile, new[] { $"{normalizedCounter}:{DateTime.UtcNow.ToString("O")}" });
+                    }
+                    catch (Exception ex)
+                    {
+                        _trace.Error(ex);
+                    }
+                }
             }
         }
 

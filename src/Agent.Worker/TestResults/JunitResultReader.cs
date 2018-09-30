@@ -28,7 +28,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
         public TestRunData ReadResults(IExecutionContext executionContext, string filePath, TestRunContext runContext = null)
         {
             // http://windyroad.com.au/dl/Open%20Source/JUnit.xsd
-
+            
             XmlDocument doc = new XmlDocument();
             try
             {
@@ -145,8 +145,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
             //create test run data
             var testRunData = new TestRunData(
                 name: runSummary.Name,
-                startedDate: runSummary.TimeStamp.ToString("o"),
-                completedDate: maxCompletedTime.ToString("o"),
+                startedDate: runSummary.TimeStamp != DateTime.MinValue ? runSummary.TimeStamp.ToString("o") : null,
+                completedDate: maxCompletedTime != DateTime.MinValue ? maxCompletedTime.ToString("o") : null,
                 state: TestRunState.InProgress.ToString(),
                 isAutomated: true,
                 buildId: runContext != null ? runContext.BuildId : 0,
@@ -311,8 +311,11 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
                 var timeValue = rootNode.Attributes["time"].Value;
                 if (timeValue != null)
                 {
-                    double timeInSeconds = 0.0;
-                    if (Double.TryParse(timeValue, NumberStyles.Any, NumberFormatInfo.InvariantInfo, out timeInSeconds))
+                    // Ensure that the time data is a positive value within range
+                    if (Double.TryParse(timeValue, NumberStyles.Any, NumberFormatInfo.InvariantInfo, out double timeInSeconds) 
+                        && !Double.IsNaN(timeInSeconds) 
+                        && !Double.IsInfinity(timeInSeconds)
+                        && timeInSeconds >= 0)
                     {
                         time = TimeSpan.FromSeconds(timeInSeconds);
                         TimeDataAvailable = true;
@@ -343,16 +346,19 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker.TestResults
 
             // Standard output logs
             stdout = testCaseNode.SelectSingleNode("./system-out");
+
+            resultCreateModel.AttachmentData = new AttachmentData();
+            
             if (stdout != null && !string.IsNullOrWhiteSpace(stdout.InnerText))
             {
-                resultCreateModel.ConsoleLog = stdout.InnerText;
+                resultCreateModel.AttachmentData.ConsoleLog = stdout.InnerText;
             }
 
             // Standard error logs
             stderr = testCaseNode.SelectSingleNode("./system-err");
             if (stderr != null && !string.IsNullOrWhiteSpace(stderr.InnerText))
             {
-                resultCreateModel.StandardError = stderr.InnerText;
+                resultCreateModel.AttachmentData.StandardError = stderr.InnerText;
             }
         }
 

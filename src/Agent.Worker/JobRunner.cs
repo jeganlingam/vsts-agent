@@ -15,6 +15,7 @@ using System.Text;
 using System.IO.Compression;
 using Microsoft.VisualStudio.Services.Agent.Worker.Build;
 using System.Diagnostics;
+using Newtonsoft.Json.Linq;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker
 {
@@ -63,14 +64,9 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             message.Variables[Constants.Variables.System.TFServerUrl] = systemConnection.Url.AbsoluteUri;
 
             // Make sure SystemConnection Url and Endpoint Url match Config Url base for OnPremises server
-            if (!message.Variables.ContainsKey(Constants.Variables.System.ServerType))
-            {
-                if (!UrlUtil.IsHosted(systemConnection.Url.AbsoluteUri)) // TODO: remove this after TFS/RM move to M133
-                {
-                    ReplaceConfigUriBaseInJobRequestMessage(message);
-                }
-            }
-            else if (string.Equals(message.Variables[Constants.Variables.System.ServerType]?.Value, "OnPremises", StringComparison.OrdinalIgnoreCase))
+            // System.ServerType will always be there after M133
+            if (!message.Variables.ContainsKey(Constants.Variables.System.ServerType) ||
+                string.Equals(message.Variables[Constants.Variables.System.ServerType]?.Value, "OnPremises", StringComparison.OrdinalIgnoreCase))
             {
                 ReplaceConfigUriBaseInJobRequestMessage(message);
             }
@@ -87,6 +83,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             await jobServer.ConnectAsync(jobConnection);
 
             _jobServerQueue.Start(message);
+            HostContext.WritePerfCounter($"WorkerJobServerQueueStarted_{message.RequestId.ToString()}");
 
             IExecutionContext jobContext = null;
             CancellationTokenRegistration? agentShutdownRegistration = null;
@@ -118,17 +115,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                     jobContext.AddIssue(new Issue() { Type = IssueType.Error, Message = errorMessage });
                 });
 
-                // Set agent version variable.
-                jobContext.Variables.Set(Constants.Variables.Agent.Version, Constants.Agent.Version);
-                jobContext.Output(StringUtil.Loc("AgentVersion", Constants.Agent.Version));
-
-                // Print proxy setting information for better diagnostic experience
-                var agentWebProxy = HostContext.GetService<IVstsAgentWebProxy>();
-                if (!string.IsNullOrEmpty(agentWebProxy.ProxyAddress))
-                {
-                    jobContext.Output(StringUtil.Loc("AgentRunningBehindProxy", agentWebProxy.ProxyAddress));
-                }
-
                 // Validate directory permissions.
                 string workDirectory = HostContext.GetDirectory(WellKnownDirectory.Work);
                 Trace.Info($"Validating directory permissions for: '{workDirectory}'");
@@ -147,32 +133,24 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                 // Set agent variables.
                 AgentSettings settings = HostContext.GetService<IConfigurationStore>().GetSettings();
                 jobContext.Variables.Set(Constants.Variables.Agent.Id, settings.AgentId.ToString(CultureInfo.InvariantCulture));
-                jobContext.Variables.Set(Constants.Variables.Agent.HomeDirectory, HostContext.GetDirectory(WellKnownDirectory.Root));
+                jobContext.SetVariable(Constants.Variables.Agent.HomeDirectory, HostContext.GetDirectory(WellKnownDirectory.Root), isFilePath: true);
                 jobContext.Variables.Set(Constants.Variables.Agent.JobName, message.JobDisplayName);
                 jobContext.Variables.Set(Constants.Variables.Agent.MachineName, Environment.MachineName);
                 jobContext.Variables.Set(Constants.Variables.Agent.Name, settings.AgentName);
                 jobContext.Variables.Set(Constants.Variables.Agent.OS, VarUtil.OS);
-                jobContext.Variables.Set(Constants.Variables.Agent.RootDirectory, HostContext.GetDirectory(WellKnownDirectory.Work));
+                jobContext.Variables.Set(Constants.Variables.Agent.OSArchitecture, VarUtil.OSArchitecture);
+                jobContext.SetVariable(Constants.Variables.Agent.RootDirectory, HostContext.GetDirectory(WellKnownDirectory.Work), isFilePath: true);
 #if OS_WINDOWS
-                jobContext.Variables.Set(Constants.Variables.Agent.ServerOMDirectory, Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Externals), Constants.Path.ServerOMDirectory));
+                jobContext.SetVariable(Constants.Variables.Agent.ServerOMDirectory, HostContext.GetDirectory(WellKnownDirectory.ServerOM), isFilePath: true);
 #else
                 jobContext.Variables.Set(Constants.Variables.Agent.AcceptTeeEula, settings.AcceptTeeEula.ToString());
 #endif
-                jobContext.Variables.Set(Constants.Variables.Agent.WorkFolder, HostContext.GetDirectory(WellKnownDirectory.Work));
-                jobContext.Variables.Set(Constants.Variables.System.WorkFolder, HostContext.GetDirectory(WellKnownDirectory.Work));
+                jobContext.SetVariable(Constants.Variables.Agent.WorkFolder, HostContext.GetDirectory(WellKnownDirectory.Work), isFilePath: true);
+                jobContext.SetVariable(Constants.Variables.System.WorkFolder, HostContext.GetDirectory(WellKnownDirectory.Work), isFilePath: true);
 
-                string toolsDirectory = Environment.GetEnvironmentVariable("AGENT_TOOLSDIRECTORY") ?? Environment.GetEnvironmentVariable(Constants.Variables.Agent.ToolsDirectory);
-                if (string.IsNullOrEmpty(toolsDirectory))
-                {
-                    toolsDirectory = Path.Combine(HostContext.GetDirectory(WellKnownDirectory.Work), Constants.Path.ToolDirectory);
-                    Directory.CreateDirectory(toolsDirectory);
-                }
-                else
-                {
-                    Trace.Info($"Set tool cache directory base on environment: '{toolsDirectory}'");
-                    Directory.CreateDirectory(toolsDirectory);
-                }
-                jobContext.Variables.Set(Constants.Variables.Agent.ToolsDirectory, toolsDirectory);
+                string toolsDirectory = HostContext.GetDirectory(WellKnownDirectory.Tools);
+                Directory.CreateDirectory(toolsDirectory);
+                jobContext.SetVariable(Constants.Variables.Agent.ToolsDirectory, toolsDirectory, isFilePath: true);
 
                 // Setup TEMP directories
                 _tempDirectoryManager = HostContext.GetService<ITempDirectoryManager>();
@@ -218,6 +196,28 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                     VarUtil.ExpandEnvironmentVariables(HostContext, target: endpoint.Data);
                 }
 
+                // Expand the repository property values.
+                foreach (var repository in jobContext.Repositories)
+                {
+                    // expand checkout option
+                    var checkoutOptions = repository.Properties.Get<JToken>(Pipelines.RepositoryPropertyNames.CheckoutOptions);
+                    if (checkoutOptions != null)
+                    {
+                        checkoutOptions = jobContext.Variables.ExpandValues(target: checkoutOptions);
+                        checkoutOptions = VarUtil.ExpandEnvironmentVariables(HostContext, target: checkoutOptions);
+                        repository.Properties.Set<JToken>(Pipelines.RepositoryPropertyNames.CheckoutOptions, checkoutOptions); ;
+                    }
+
+                    // expand workspace mapping
+                    var mappings = repository.Properties.Get<JToken>(Pipelines.RepositoryPropertyNames.Mappings);
+                    if (mappings != null)
+                    {
+                        mappings = jobContext.Variables.ExpandValues(target: mappings);
+                        mappings = VarUtil.ExpandEnvironmentVariables(HostContext, target: mappings);
+                        repository.Properties.Set<JToken>(Pipelines.RepositoryPropertyNames.Mappings, mappings);
+                    }
+                }
+
                 // Get the job extension.
                 Trace.Info("Getting job extension.");
                 var hostType = jobContext.Variables.System_HostType;
@@ -258,6 +258,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                 // trace out all steps
                 Trace.Info($"Total job steps: {jobSteps.Count}.");
                 Trace.Verbose($"Job steps: '{string.Join(", ", jobSteps.Select(x => x.DisplayName))}'");
+                HostContext.WritePerfCounter($"WorkerJobInitialized_{message.RequestId.ToString()}");
 
                 bool processCleanup = jobContext.Variables.GetBoolean("process.clean") ?? true;
                 HashSet<string> existingProcesses = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
@@ -310,14 +311,10 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                             {
                                 Trace.Info($"Inspecting process environment variables. PID: {proc.Key} ({proc.Value.ProcessName})");
 
-                                Dictionary<string, string> env = new Dictionary<string, string>();
+                                string lookupId = null;
                                 try
                                 {
-                                    env = proc.Value.GetEnvironmentVariables();
-                                    foreach (var e in env)
-                                    {
-                                        Trace.Verbose($"PID:{proc.Key} ({e.Key}={e.Value})");
-                                    }
+                                    lookupId = proc.Value.GetEnvironmentVariable(HostContext, Constants.ProcessLookupId);
                                 }
                                 catch (Exception ex)
                                 {
@@ -325,8 +322,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                                     Trace.Verbose(ex.ToString());
                                 }
 
-                                if (env.TryGetValue(Constants.ProcessLookupId, out string lookupId) &&
-                                    lookupId.Equals(processLookupId, StringComparison.OrdinalIgnoreCase))
+                                if (string.Equals(lookupId, processLookupId, StringComparison.OrdinalIgnoreCase))
                                 {
                                     Trace.Info($"Terminate orphan process: pid ({proc.Key}) ({proc.Value.ProcessName})");
                                     try

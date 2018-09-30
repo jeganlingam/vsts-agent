@@ -39,6 +39,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                 channel.StartClient(pipeIn, pipeOut);
 
                 // Wait for up to 30 seconds for a message from the channel.
+                HostContext.WritePerfCounter("WorkerWaitingForJobMessage");
                 Trace.Info("Waiting to receive the job message from the channel.");
                 WorkerMessage channelMessage;
                 using (var csChannelMessage = new CancellationTokenSource(_workerStartTimeout))
@@ -52,6 +53,7 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
                 ArgUtil.NotNullOrEmpty(channelMessage.Body, nameof(channelMessage.Body));
                 var jobMessage = JsonUtility.FromString<Pipelines.AgentJobRequestMessage>(channelMessage.Body);
                 ArgUtil.NotNull(jobMessage, nameof(jobMessage));
+                HostContext.WritePerfCounter($"WorkerJobMessageReceived_{jobMessage.RequestId.ToString()}");
 
                 // Initialize the secret masker and set the thread culture.
                 InitializeSecretMasker(jobMessage);

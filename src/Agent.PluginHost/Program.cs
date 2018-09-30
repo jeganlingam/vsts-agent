@@ -3,6 +3,7 @@ using System.IO;
 using System.Linq;
 using System.Reflection;
 using System.Runtime.Loader;
+using System.Text;
 using System.Threading;
 using Agent.Sdk;
 using Microsoft.TeamFoundation.DistributedTask.WebApi;
@@ -17,6 +18,10 @@ namespace Agent.PluginHost
 
         public static int Main(string[] args)
         {
+            // We can't use the new SocketsHttpHandler for now for both Windows and Linux
+            // On linux, Negotiate auth is not working if the TFS url is behind Https
+            // On windows, Proxy is not working
+            AppContext.SetSwitch("System.Net.Http.UseSocketsHttpHandler", false);
             Console.CancelKeyPress += Console_CancelKeyPress;
 
             try
@@ -30,6 +35,8 @@ namespace Agent.PluginHost
                     string assemblyQualifiedName = args[1];
                     ArgUtil.NotNullOrEmpty(assemblyQualifiedName, nameof(assemblyQualifiedName));
 
+                    // Set encoding to UTF8, process invoker will use UTF8 write to STDIN
+                    Console.InputEncoding = Encoding.UTF8;
                     string serializedContext = Console.ReadLine();
                     ArgUtil.NotNullOrEmpty(serializedContext, nameof(serializedContext));
 

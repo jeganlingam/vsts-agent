@@ -7,6 +7,9 @@ using System.Collections.Generic;
 using System.Linq;
 using BuildWebApi = Microsoft.TeamFoundation.Build.WebApi;
 using Microsoft.TeamFoundation.DistributedTask.Logging;
+using Microsoft.VisualStudio.Services.Agent.Worker.Container;
+using Newtonsoft.Json.Linq;
+using Microsoft.VisualStudio.Services.WebApi;
 
 namespace Microsoft.VisualStudio.Services.Agent.Worker
 {
@@ -75,7 +78,8 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             RecalculateExpanded(out warnings);
         }
 
-        public string Agent_BuildDirectory => Get(Constants.Variables.Agent.BuildDirectory);
+        // DO NOT add file path variable to here.
+        // All file path variables needs to be retrive and set through ExecutionContext, so it can handle container file path translation.
 
         public TaskResult? Agent_JobStatus
         {
@@ -95,14 +99,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         public string Agent_ProxyUsername => Get(Constants.Variables.Agent.ProxyUsername);
 
         public string Agent_ProxyPassword => Get(Constants.Variables.Agent.ProxyPassword);
-
-        public string Agent_ServerOMDirectory => Get(Constants.Variables.Agent.ServerOMDirectory);
-
-        public string Agent_TempDirectory => Get(Constants.Variables.Agent.TempDirectory);
-
-        public string Agent_ToolsDirectory => Get(Constants.Variables.Agent.ToolsDirectory);
-
-        public string Agent_WorkFolder => Get(Constants.Variables.Agent.WorkFolder);
 
         public int? Build_BuildId => GetInt(BuildWebApi.BuildVariables.BuildId);
 
@@ -125,8 +121,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         public string Build_RequestedFor => Get((BuildWebApi.BuildVariables.RequestedFor));
 
         public string Build_SourceBranch => Get(Constants.Variables.Build.SourceBranch);
-
-        public string Build_SourcesDirectory => Get(Constants.Variables.Build.SourcesDirectory);
 
         public string Build_SourceTfvcShelveset => Get(Constants.Variables.Build.SourceTfvcShelveset);
 
@@ -151,8 +145,6 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
         public string System_CollectionId => Get(Constants.Variables.System.CollectionId);
 
         public bool? System_Debug => GetBoolean(Constants.Variables.System.Debug);
-
-        public string System_DefaultWorkingDirectory => Get(Constants.Variables.System.DefaultWorkingDirectory);
 
         public string System_DefinitionId => Get(Constants.Variables.System.DefinitionId);
 
@@ -180,6 +172,18 @@ namespace Microsoft.VisualStudio.Services.Agent.Worker
             }
 
             VarUtil.ExpandValues(_hostContext, source, target);
+        }
+
+        public JToken ExpandValues(JToken target)
+        {
+            _trace.Entering();
+            var source = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase);
+            foreach (Variable variable in _expanded.Values)
+            {
+                source[variable.Name] = variable.Value;
+            }
+
+            return VarUtil.ExpandValues(_hostContext, source, target);
         }
 
         public string Get(string name)
