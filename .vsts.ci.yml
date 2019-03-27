@@ -49,7 +49,7 @@ jobs:
          "toolName": "signtool.exe",
          "toolVersion": "6.2.9304.0"
          }
-      ]
+       ]
 
   # Package dotnet core windows dependency (VC++ Redistributable)
   - powershell: |
