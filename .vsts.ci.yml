@@ -156,7 +156,7 @@ jobs:
 ################################################################################
   displayName: Linux Agent (ARM)
   pool:
-    name: buildDevs
+    name: Hosted VS2017
     demands: 'Agent.OSArchitecture -equals ARM'
   steps:
 
