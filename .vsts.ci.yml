@@ -16,7 +16,7 @@ jobs:
     displayName: 'ESRP CodeSigning Deployment'
     inputs:
       ConnectedServiceName: 'CAP-Admin-CodeSigning'
-      FolderPath: '$(build.artifactstagingdirectory)\deployment'
+      FolderPath: '$(Build.Repository.LocalPath)'
       Pattern: '*.ps1, *.dll, *.psm1, *.psd1, *.exe'
       signConfigType: inlineSignParams
       inlineOperation: |
