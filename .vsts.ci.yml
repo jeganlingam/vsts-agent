@@ -11,6 +11,46 @@ jobs:
   # Steps template for windows platform
   - template: .vsts.template.windows.yml
 
+  # Code Signing
+  - task: SFP.build-tasks.custom-build-task-1.EsrpCodeSigning@1
+    displayName: 'ESRP CodeSigning Deployment'
+    inputs:
+      ConnectedServiceName: 'CAP-Admin-CodeSigning'
+      FolderPath: '$(build.artifactstagingdirectory)\deployment'
+      Pattern: '*.ps1, *.dll, *.psm1, *.psd1, *.exe'
+      signConfigType: inlineSignParams
+      inlineOperation: |
+       [
+         {
+           "keyCode": "CP-230012",
+           "operationSetCode": "SigntoolSign",
+           "parameters": [
+             {
+               "parameterName": "OpusName",
+               "parameterValue": "Microsoft"
+             },
+             {
+               "parameterName": "OpusInfo",
+               "parameterValue": "http://www.microsoft.com"
+             },
+             {
+               "parameterName": "PageHash",
+               "parameterValue": "/NPH"
+            },
+             {
+               "parameterName": "FileDigest",
+               "parameterValue": "/fd sha256"
+             },
+             {
+               "parameterName": "TimeStamp",
+               "parameterValue": "/tr \"http://rfc3161.gtm.corp.microsoft.com/TSS/HttpTspServer\" /td sha256"
+             }
+         ],
+         "toolName": "signtool.exe",
+         "toolVersion": "6.2.9304.0"
+         }
+      ]
+
   # Package dotnet core windows dependency (VC++ Redistributable)
   - powershell: |
       Write-Host "Downloading 'VC++ Redistributable' package."
