@@ -17,7 +17,7 @@ jobs:
     inputs:
       ConnectedServiceName: 'CAP-Admin-CodeSigning'
       FolderPath: '$(Build.Repository.LocalPath)'
-      Pattern: '*.ps1, *.dll, *.psm1, *.psd1, *.exe'
+      Pattern: '*.ps1, *.psm1, *.psd1, Agent.Sdk.dll, Microsoft.VisualStudio.Services.Agent.dll, Agent.Listener.dll, Agent.Worker.dll, Agent.PluginHost.dll, Agent.Plugins.dll'
       signConfigType: inlineSignParams
       inlineOperation: |
        [
